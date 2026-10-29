@@ -190,7 +190,7 @@ function seedDB() {
     }));
 
     const db = {
-        version: 1, seq: 1000, settings,
+        version: 2, seq: 1000, settings,
         users: [
             { id: 'u1', username: 'admin', name: 'Admin', password: 'admin123', role: 'admin' },
             { id: 'u2', username: 'staff', name: 'Rahul', password: 'staff123', role: 'staff' }
@@ -264,9 +264,11 @@ function seedDB() {
         { id: 'b6', name: 'Meera Iyer', phone: '9406890123', date: day(-1), time: '20:00', guests: 2, tableId: 't2', note: '', status: 'completed' }
     ].map(b => ({ ...b, createdAt: new Date().toISOString() }));
 
+    addDemoExtras(db);
     return db;
 }
 
+let lastRaw = '';
 function loadDB() {
     try {
         const raw = localStorage.getItem(STORE_KEY);
@@ -275,7 +277,11 @@ function loadDB() {
             if (parsed && Array.isArray(parsed.dishes) && Array.isArray(parsed.orders)) {
                 DB = parsed;
                 DB.settings = { ...DEFAULT_SETTINGS, ...DB.settings };
+                const had = !!DB.demoV2;
+                migrateDB(DB);
                 DB.orders.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+                lastRaw = raw;
+                if (!had) saveDB();
                 return;
             }
         }
@@ -284,10 +290,111 @@ function loadDB() {
     saveDB();
 }
 function saveDB() {
-    try { localStorage.setItem(STORE_KEY, JSON.stringify(DB)); }
+    try { const raw = JSON.stringify(DB); localStorage.setItem(STORE_KEY, raw); lastRaw = raw; }
     catch (e) {
         if (!storageWarned) { storageWarned = true; toast('Could not save – browser storage is full or blocked', 'error'); }
     }
+}
+/* If another tab/window changed the saved data, load it. Returns true when DB was replaced. */
+function syncDB() {
+    let raw = null;
+    try { raw = localStorage.getItem(STORE_KEY); } catch (e) { return false; }
+    if (!raw || raw === lastRaw) return false;
+    try {
+        const p = JSON.parse(raw);
+        if (p && Array.isArray(p.dishes) && Array.isArray(p.orders)) {
+            DB = p; DB.settings = { ...DEFAULT_SETTINGS, ...DB.settings };
+            DB.orders.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+            lastRaw = raw; return true;
+        }
+    } catch (e) { /* ignore */ }
+    return false;
+}
+
+
+/* ==========================================================================
+   DISH PHOTOS  (real, high-resolution photo for every dish, matched by name)
+   --------------------------------------------------------------------------
+   Each dish name is mapped to the Wikipedia/Wikimedia Commons article of that
+   exact dish. The lead photo is requested at ~1600px width (Ultra-HD for a
+   card), then cached in the saved DB so it loads instantly next time.
+   Needs internet once. If a photo can't load, the emoji tile stays as backup.
+   ========================================================================== */
+const DISH_PHOTO_TITLE = {
+    'Paneer Butter Masala': 'Paneer butter masala',
+    'Veg Biryani': 'Vegetable biryani',
+    'Chicken Tandoori': 'Tandoori chicken',
+    'Masala Dosa': 'Masala dosa',
+    'Veg Burger': 'Veggie burger',
+    'Chocolate Brownie': 'Chocolate brownie',
+    'Fresh Lime Soda': 'Nimbu pani',
+    'Cold Coffee': 'Iced coffee',
+    'Idli Sambar': 'Idli',
+    'Indori Poha Jalebi': 'Poha',
+    'Aloo Paratha': 'Paratha',
+    'Veg Sandwich': 'Vegetable sandwich',
+    'Masala Omelette': 'Omelette',
+    'Dal Tadka': 'Dal',
+    'Chole Bhature': 'Chole bhature',
+    'Veg Thali': 'Thali',
+    'Butter Naan': 'Naan',
+    'Chicken Biryani': 'Biryani',
+    'Paneer Tikka': 'Paneer tikka',
+    'Butter Chicken': 'Butter chicken',
+    'Veg Pizza': 'Pizza',
+    'Pasta Alfredo': 'Fettuccine Alfredo',
+    'Hakka Noodles': 'Hakka noodles',
+    'Veg Manchurian': 'Manchurian (food)',
+    'Masala Chai': 'Masala chai',
+    'Mango Lassi': 'Lassi',
+    'Sweet Lassi': 'Lassi',
+    'Fresh Orange Juice': 'Orange juice',
+    'Gulab Jamun': 'Gulab jamun',
+    'Rasmalai': 'Ras malai',
+    'Ice Cream Sundae': 'Sundae',
+    'Cheesecake': 'Cheesecake',
+    'Kulfi Falooda': 'Falooda'
+};
+const PHOTO_W = 1600;
+const WIKI_API = 'https://en.wikipedia.org/w/api.php';
+
+async function wikiPhoto(params) {
+    const q = new URLSearchParams({
+        action: 'query', format: 'json', origin: '*', redirects: '1',
+        prop: 'pageimages', piprop: 'thumbnail', pithumbsize: String(PHOTO_W), ...params
+    });
+    const r = await fetch(WIKI_API + '?' + q);
+    if (!r.ok) throw new Error('http ' + r.status);
+    const j = await r.json();
+    const pages = Object.values((j.query && j.query.pages) || {}).sort((a, b) => (a.index || 0) - (b.index || 0));
+    const hit = pages.find(p => p.thumbnail && p.thumbnail.source);
+    return hit ? hit.thumbnail.source : '';
+}
+async function findDishPhoto(name) {
+    const title = DISH_PHOTO_TITLE[name] || name;
+    try {
+        let url = await wikiPhoto({ titles: title });                          // exact dish article
+        if (!url) url = await wikiPhoto({ generator: 'search', gsrsearch: title + ' food', gsrlimit: '3' }); // fallback search
+        return url;
+    } catch (e) { return ''; }
+}
+let photosBusy = false;
+async function loadDishPhotos() {
+    if (photosBusy || !navigator.onLine) return;
+    photosBusy = true;
+    const todo = DB.dishes.filter(d => !d.img);
+    const cache = {};
+    let changed = 0;
+    for (let i = 0; i < todo.length; i += 6) {                                 // 6 at a time
+        await Promise.all(todo.slice(i, i + 6).map(async d => {
+            const key = DISH_PHOTO_TITLE[d.name] || d.name;
+            if (!(key in cache)) cache[key] = findDishPhoto(d.name);
+            const url = await cache[key];
+            if (url) { d.img = url; changed++; }
+        }));
+        if (changed) { saveDB(); if (state.route === 'menu' && $('#dishGrid')) renderDishGrid(); if (!$('#custApp').classList.contains('hidden')) K.draw(); }
+    }
+    photosBusy = false;
 }
 
 /* ---------- runtime state (not saved) ---------- */
@@ -423,6 +530,7 @@ const tierOf = spent => spent >= 5000 ? ['Gold', 'tier-gold'] : spent >= 2000 ? 
 
 /* ---------- orders ---------- */
 function createOrder(info) {
+    syncDB();
     const lines = cartLines();
     const t = calcTotals(lines, state.cart.type, state.cart.coupon);
     const cust = findOrCreateCustomer(info.name, info.phone);
@@ -448,6 +556,7 @@ function setOrderStatus(id, status) {
     if (!o) return;
     o.status = status;
     if (status === 'cancelled' && o.paymentStatus === 'paid') { o.paymentStatus = 'refunded'; o.refundedAt = new Date().toISOString(); }
+    else if (status === 'cancelled' && o.paymentStatus === 'pending') o.paymentStatus = 'void';
     saveDB();
     updateBadges();
 }
@@ -578,6 +687,8 @@ function renderNav() {
       <span class="ni">${ic(n.icon, 20)}</span><span class="nl">${n.label}</span>
       ${n.id === 'orders' ? '<span class="nbadge" id="ordBadge"></span>' : ''}
     </a>`).join('') +
+        `<button class="nav-item nav-mobile-only" data-action="toggle-theme" title="Theme"><span class="ni"><span data-theme-icon>${getTheme() === 'bw' ? '◑' : '◐'}</span></span><span class="nl">Theme</span></button>
+    <button class="nav-item nav-mobile-only" data-action="change-pass" title="Change password"><span class="ni">${ic('lock', 20)}</span><span class="nl">Password</span></button>` +
         `<button class="nav-item" data-action="logout" title="Logout"><span class="ni">${ic('logout', 20)}</span><span class="nl">Logout</span></button>`;
     updateBadges();
 }
@@ -647,6 +758,7 @@ function updateCheckoutBar() {
     const bar = $('#checkoutBar');
     if (!bar) return;
     bar.classList.toggle('show', state.route === 'menu' && lines.length > 0);
+    document.body.classList.toggle('has-cbar', isMobile() && state.route === 'menu' && lines.length > 0);
     $('#cbTotal').textContent = money(t.total);
 }
 
@@ -676,8 +788,10 @@ function doLogin() {
     btn.classList.add('loading'); btn.disabled = true;
     setTimeout(() => {
         btn.classList.remove('loading'); btn.disabled = false;
+        syncDB();
         const user = DB.users.find(x => x.username.toLowerCase() === u && x.password === p);
         if (!user) return loginError('Incorrect username or password');
+        if (user.role !== loginRole) return loginError(user.role === 'admin' ? 'This is an admin account – use the Admin tab' : 'This is a staff account – use the Staff tab');
         const remember = $('#lfRemember').checked;
         try {
             (remember ? localStorage : sessionStorage).setItem(SESSION_KEY, JSON.stringify({ id: user.id }));
@@ -689,6 +803,7 @@ function doLogin() {
 }
 function enterApp(user, silent) {
     state.user = user;
+    setScreen('staff');
     $('#login').classList.add('hidden');
     $('#login').classList.remove('leaving');
     const app = $('#app');
@@ -715,7 +830,10 @@ function logout() {
     setTimeout(() => lg.classList.remove('entering'), 900);
     $('#lfPass').value = ''; $('#lfError').textContent = '';
     history.replaceState(null, '', location.pathname);
+    setScreen('login'); BOT.close();
+    setLoginRole(user_last_role());
 }
+const user_last_role = () => { try { return localStorage.getItem('fh_lastrole') || 'admin'; } catch (e) { return 'admin'; } };
 function savedSessionUser() {
     try {
         const s = JSON.parse(localStorage.getItem(SESSION_KEY) || sessionStorage.getItem(SESSION_KEY) || 'null');
@@ -768,7 +886,7 @@ function renderChips() {
 
 const catHue = cat => { const i = DB.categories.indexOf(cat); return [38, 20, 8, 168, 330, 262, 95][(i < 0 ? 0 : i) % 7]; };
 function dishVisual(d) {
-    return `<div class="tile" style="--h:${catHue(d.cat)}"><span class="plate"><span class="emo">${esc(d.emoji || '🍽️')}</span></span>${d.img ? `<img src="${esc(d.img)}" alt="" loading="lazy" onerror="this.remove()">` : ''}</div>`;
+    return `<div class="tile" style="--h:${catHue(d.cat)}"><span class="plate"><span class="emo">${esc(d.emoji || '🍽️')}</span></span>${d.img ? `<img src="${esc(d.img)}" alt="${esc(d.name)}" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</div>`;
 }
 function dishCard(d) {
     const q = cartQty(d.id), admin = isAdmin();
@@ -1049,7 +1167,7 @@ function invoiceHTML(o) {
       <div class="grand"><span>Grand total</span><b>${money(o.total)}</b></div>
     </div>
     <div class="inv-pay">
-      <div><span>Payment</span><b>${METHOD_LABEL[o.method]} · ${refunded ? 'Refunded' : 'Paid'}</b></div>
+      <div><span>Payment</span><b>${o.paymentStatus === 'pending' ? 'Unpaid – pay at the restaurant / on delivery' : o.paymentStatus === 'void' ? 'Order cancelled – not charged' : METHOD_LABEL[o.method] + ' · ' + (refunded ? 'Refunded' : 'Paid')}</b></div>
       ${o.ref ? `<div><span>Reference</span><b>${esc(o.ref)}</b></div>` : ''}
       ${o.method === 'cash' && o.tendered ? `<div><span>Cash received / change</span><b>${money(o.tendered)} / ${money(o.change)}</b></div>` : ''}
       ${o.note ? `<div><span>Note</span><b>${esc(o.note)}</b></div>` : ''}
@@ -1132,11 +1250,11 @@ function readImageFile(file, cb) {
     fr.onload = () => {
         const img = new Image();
         img.onload = () => {
-            const max = 480, k = Math.min(1, max / Math.max(img.width, img.height));
+            const max = 1280, k = Math.min(1, max / Math.max(img.width, img.height));
             const cv = document.createElement('canvas');
             cv.width = Math.round(img.width * k); cv.height = Math.round(img.height * k);
             cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
-            cb(cv.toDataURL('image/jpeg', 0.8));
+            cb(cv.toDataURL('image/jpeg', 0.85));
         };
         img.onerror = () => toast('That file is not a valid image', 'error');
         img.src = fr.result;
@@ -1192,10 +1310,10 @@ function donutHTML(items) {
     let acc = 0;
     const stops = items.map((it, i) => {
         const a = acc / total * 100; acc += it.value; const b = acc / total * 100;
-        return `${CHART_COLORS[i % CHART_COLORS.length]} ${a}% ${b}%`;
+        return `${chartCol(i)} ${a}% ${b}%`;
     }).join(',');
     return `<div class="donut-wrap"><div class="donut" style="background:conic-gradient(${stops})"><span><b>${money(total)}</b><small>total</small></span></div>
-    <ul class="legend-list">${items.map((it, i) => `<li><i style="background:${CHART_COLORS[i % CHART_COLORS.length]}"></i><span>${esc(it.label)}</span><b>${Math.round(it.value / total * 100)}%</b></li>`).join('')}</ul></div>`;
+    <ul class="legend-list">${items.map((it, i) => `<li><i style="background:${chartCol(i)}"></i><span>${esc(it.label)}</span><b>${Math.round(it.value / total * 100)}%</b></li>`).join('')}</ul></div>`;
 }
 const statusBadge = s => `<span class="badge st-${s}">${STATUS_LABEL[s] || s}</span>`;
 const refreshView = () => { if (state.user) { ROUTES[state.route].render(); updateCheckoutBar(); updateBadges(); } };
@@ -1238,7 +1356,7 @@ function viewDashboard() {
       <div class="live-list">${active.length ? active.slice(0, 6).map(o => `
         <div class="live-item">
           <div><b>${esc(o.id)}</b> ${statusBadge(o.status)}
-            <p>${TYPE_LABEL[o.type]}${o.tableId ? ' · ' + esc(tableById(o.tableId)?.name || '') : ''} · ${o.items.reduce((s, i) => s + i.qty, 0)} items · ${timeAgo(o.createdAt)}</p></div>
+            <p>${TYPE_LABEL[o.type]}${o.tableId ? ' · ' + esc(tableById(o.tableId)?.name || '') : ''} · ${o.items.reduce((s, i) => s + i.qty, 0)} items · ${timeAgo(o.createdAt)}${o.paymentStatus === 'pending' ? ' · <b>Unpaid</b>' : ''}${o.cashier === 'Online' ? ' · Online' : ''}</p></div>
           <button class="btn gold xs" data-action="advance" data-id="${o.id}">${NEXT_LABEL[o.status]}</button>
         </div>`).join('') : '<div class="empty small"><p>No live orders – the kitchen is clear</p></div>'}</div>
     </section>
@@ -1294,10 +1412,11 @@ function renderOrdersList() {
       <td>${TYPE_LABEL[o.type]}${o.tableId ? `<small>${esc(tableById(o.tableId)?.name || '')}</small>` : ''}</td>
       <td class="items-cell" title="${esc(o.items.map(i => i.name + ' ×' + i.qty).join(', '))}">${o.items.map(i => esc(i.name) + ' ×' + i.qty).join(', ')}</td>
       <td class="r"><b>${money(o.total)}</b></td>
-      <td>${METHOD_LABEL[o.method]}<small class="${o.paymentStatus === 'paid' ? 'ok' : 'bad'}">${o.paymentStatus === 'paid' ? 'Paid' : 'Refunded'}</small></td>
+      <td>${o.paymentStatus === 'pending' ? '<span class="muted">–</span>' : METHOD_LABEL[o.method]}<small class="${o.paymentStatus === 'paid' ? 'ok' : 'bad'}">${PAY_LABEL[o.paymentStatus] || o.paymentStatus}</small></td>
       <td>${statusBadge(o.status)}</td>
       <td class="r acts">
         ${NEXT_STATUS[o.status] ? `<button class="btn gold xs" data-action="advance" data-id="${o.id}">${NEXT_LABEL[o.status]}</button>` : ''}
+        ${o.paymentStatus === 'pending' && o.status !== 'cancelled' ? `<button class="btn outline xs" data-action="collect-pay" data-id="${o.id}">Collect ${money(o.total)}</button>` : ''}
         <button class="icon-btn dark" data-action="view-order" data-id="${o.id}" title="View bill" aria-label="View bill">${ic('eye', 17)}</button>
         <button class="icon-btn dark" data-action="print" data-id="${o.id}" title="Print bill" aria-label="Print bill">${ic('printer', 17)}</button>
         ${ACTIVE.includes(o.status) ? `<button class="icon-btn dark red" data-action="cancel-order" data-id="${o.id}" title="Cancel &amp; refund" aria-label="Cancel order">${ic('x', 17)}</button>` : ''}
@@ -1340,10 +1459,10 @@ function renderBookingList() {
     <table class="tbl"><thead><tr><th>Date</th><th>Time</th><th>Guest</th><th>Guests</th><th>Table</th><th>Note</th><th>Status</th><th class="r">Actions</th></tr></thead>
     <tbody>${list.map(b => `<tr>
       <td class="nowrap"><b>${b.date === today ? 'Today' : fmtD(b.date)}</b></td><td>${fmtT(b.time)}</td>
-      <td><b>${esc(b.name)}</b><small>${esc(b.phone)}</small></td><td>${b.guests}</td><td>${esc(tableById(b.tableId)?.name || '-')}</td>
+      <td><b>${esc(b.name)}</b><small>${esc(b.phone)}${b.source === 'online' ? ' · online' : ''}</small></td><td>${b.guests}</td><td>${esc(tableById(b.tableId)?.name || '-')}</td>
       <td class="items-cell">${esc(b.note) || '<span class="muted">–</span>'}</td>
       <td><span class="badge bk-${b.status}">${b.status[0].toUpperCase() + b.status.slice(1)}</span></td>
-      <td class="r acts">${b.status === 'confirmed' ? `<button class="btn gold xs" data-action="bk-complete" data-id="${b.id}">Seated / done</button>
+      <td class="r acts">${b.status === 'confirmed' && b.date === today ? `<button class="btn outline xs" data-action="bk-order" data-id="${b.id}">Take order</button>` : ''}${b.status === 'confirmed' ? `<button class="btn gold xs" data-action="bk-complete" data-id="${b.id}">Seated / done</button>
         <button class="icon-btn dark red" data-action="bk-cancel" data-id="${b.id}" title="Cancel booking" aria-label="Cancel booking">${ic('x', 17)}</button>` : ''}</td></tr>`).join('')}</tbody></table>`
         : `<div class="empty"><div class="e-ic">📅</div><h4>No ${tab} bookings</h4><p>Use “New booking” to reserve a table for a guest.</p></div>`;
 }
@@ -1546,7 +1665,7 @@ function viewPayments() {
     <label class="search-light">${ic('search', 16)}<input data-input="pay" data-k="q" value="${esc(f.q)}" placeholder="Search bill no., customer or reference" autocomplete="off"></label>
     <select data-input="pay" data-k="range" aria-label="Date range">${[['today', 'Today'], ['7', 'Last 7 days'], ['30', 'Last 30 days'], ['all', 'All time']].map(([v, l]) => `<option value="${v}" ${f.range === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
     <select data-input="pay" data-k="method" aria-label="Method"><option value="all">All methods</option>${Object.keys(METHOD_LABEL).map(m => `<option value="${m}" ${f.method === m ? 'selected' : ''}>${METHOD_LABEL[m]}</option>`).join('')}</select>
-    <select data-input="pay" data-k="status" aria-label="Status"><option value="all">Paid &amp; refunded</option><option value="paid" ${f.status === 'paid' ? 'selected' : ''}>Paid</option><option value="refunded" ${f.status === 'refunded' ? 'selected' : ''}>Refunded</option></select>
+    <select data-input="pay" data-k="status" aria-label="Status"><option value="all">All statuses</option><option value="paid" ${f.status === 'paid' ? 'selected' : ''}>Paid</option><option value="pending" ${f.status === 'pending' ? 'selected' : ''}>Unpaid</option><option value="refunded" ${f.status === 'refunded' ? 'selected' : ''}>Refunded</option></select>
   </div>
   <div class="card tbl-wrap" id="payList"></div>`;
     renderPaymentsList();
@@ -1557,7 +1676,7 @@ function renderPaymentsList() {
     const paid = inRange.filter(isRevenue), by = m => paid.filter(o => o.method === m).reduce((s, o) => s + o.total, 0);
     const refunded = inRange.filter(o => o.paymentStatus === 'refunded');
     $('#payStats').innerHTML = `
-    <div class="stat"><span class="s-ic gold">${ic('rupee', 20)}</span><div><small>Collected</small><b>${money(paid.reduce((s, o) => s + o.total, 0))}</b><em>${paid.length} payments</em></div></div>
+    <div class="stat"><span class="s-ic gold">${ic('rupee', 20)}</span><div><small>Collected</small><b>${money(paid.reduce((s, o) => s + o.total, 0))}</b><em>${paid.length} payments${inRange.filter(o => o.paymentStatus === 'pending' && o.status !== 'cancelled').length ? ' · ' + inRange.filter(o => o.paymentStatus === 'pending' && o.status !== 'cancelled').length + ' unpaid' : ''}</em></div></div>
     <div class="stat"><span class="s-ic dark">${ic('rupee', 20)}</span><div><small>Cash</small><b>${money(by('cash'))}</b></div></div>
     <div class="stat"><span class="s-ic dark">${ic('payments', 20)}</span><div><small>Card</small><b>${money(by('card'))}</b></div></div>
     <div class="stat"><span class="s-ic dark">${ic('phone', 20)}</span><div><small>UPI</small><b>${money(by('upi'))}</b></div></div>
@@ -1570,13 +1689,14 @@ function renderPaymentsList() {
     <tbody>${shown.map(o => `<tr>
       <td><b>${esc(o.id)}</b></td><td class="nowrap">${fmtDT(o.createdAt)}</td>
       <td>${esc(o.customerName) || '<span class="muted">Walk-in</span>'}</td>
-      <td><span class="badge m-${o.method}">${METHOD_LABEL[o.method]}</span></td>
+      <td>${o.paymentStatus === 'pending' || o.paymentStatus === 'void' ? '<span class="muted">–</span>' : `<span class="badge m-${o.method}">${METHOD_LABEL[o.method]}</span>`}</td>
       <td>${esc(o.ref) || '<span class="muted">–</span>'}</td>
       <td class="r"><b>${money(o.total)}</b></td>
-      <td><span class="badge ${o.paymentStatus === 'paid' ? 'st-completed' : 'st-cancelled'}">${o.paymentStatus === 'paid' ? 'Paid' : 'Refunded'}</span></td>
+      <td><span class="badge ${payBadgeClass(o.paymentStatus)}">${PAY_LABEL[o.paymentStatus] || o.paymentStatus}</span></td>
       <td class="r acts">
         <button class="icon-btn dark" data-action="view-order" data-id="${o.id}" title="View bill" aria-label="View bill">${ic('eye', 17)}</button>
         <button class="icon-btn dark" data-action="print" data-id="${o.id}" title="Print bill" aria-label="Print bill">${ic('printer', 17)}</button>
+        ${o.paymentStatus === 'pending' && o.status !== 'cancelled' ? `<button class="btn gold xs" data-action="collect-pay" data-id="${o.id}">Collect</button>` : ''}
         ${isAdmin() && o.paymentStatus === 'paid' ? `<button class="btn outline xs red" data-action="refund" data-id="${o.id}">Refund</button>` : ''}
       </td></tr>`).join('')}</tbody></table>
     ${list.length > shown.length ? `<div class="more"><button class="btn outline sm" data-action="pay-more">Show more (${list.length - shown.length} left)</button></div>` : ''}`
@@ -1730,6 +1850,16 @@ const ACTIONS = {
     'book-table'() { openBookingModal(); },
     'goto-cart'() { gotoCart(); },
     'goto-menu'() { location.hash = '#/menu'; },
+    'toggle-theme'() { applyTheme(getTheme() === 'bw' ? 'gold' : 'bw'); },
+    'collect-pay'(t) { openCollectModal(t.dataset.id, false); },
+    'bk-order'(t) {
+        const b = DB.bookings.find(x => x.id === t.dataset.id);
+        if (!b) return;
+        state.cart.type = 'dine-in'; saveCart();
+        state.co = freshCheckoutState(); Object.assign(state.co, { table: b.tableId, name: b.name, phone: b.phone, note: b.note || '' });
+        location.hash = '#/menu'; updateCartUI();
+        toast(`Add dishes for ${b.name} – table ${(tableById(b.tableId) || {}).name || ''} is already selected`);
+    },
 
     /* menu & cart */
     cat(t) { state.cat = t.dataset.cat; if (state.route === 'menu') { renderChips(); renderDishGrid(); } },
@@ -1752,6 +1882,7 @@ const ACTIONS = {
         const o = orderById(t.dataset.id);
         if (!o || !NEXT_STATUS[o.status]) return;
         const next = NEXT_STATUS[o.status];
+        if (next === 'completed' && o.paymentStatus === 'pending') return openCollectModal(o.id, true);
         setOrderStatusAndRefresh(o.id, next, `${o.id} is now ${STATUS_LABEL[next].toLowerCase()}`);
     },
     'cancel-order'(t) {
@@ -1770,7 +1901,7 @@ const ACTIONS = {
         const b = DB.bookings.find(x => x.id === t.dataset.id);
         if (!b) return;
         askConfirm({ title: 'Cancel this booking?', msg: `${esc(b.name)}’s booking for ${fmtD(b.date)} at ${fmtT(b.time)} will be cancelled.`, ok: 'Cancel booking', danger: true },
-            () => { b.status = 'cancelled'; saveDB(); toast('Booking cancelled'); refreshView(); });
+            () => { const bb = DB.bookings.find(x => x.id === b.id); if (bb) { bb.status = 'cancelled'; saveDB(); toast('Booking cancelled'); refreshView(); } });
     },
 
     /* dishes & categories (admin) */
@@ -1851,7 +1982,7 @@ document.addEventListener('click', e => {
     const t = e.target.closest('[data-action]');
     if (!t || t.disabled) return;
     const fn = ACTIONS[t.dataset.action];
-    if (fn) fn(t, e);
+    if (fn) { if (state.user && !['backdrop', 'modal-close', 'confirm-yes'].includes(t.dataset.action) && !modalOpen()) syncDB(); fn(t, e); }
 });
 
 /* ---------- live inputs ---------- */
@@ -1917,6 +2048,7 @@ document.addEventListener('change', e => {
 /* ---------- forms ---------- */
 const FORMS = {
     checkout: submitCheckout,
+    collect: collectPaymentForm,
     dish: saveDishForm,
     booking: saveBookingForm,
     customer: saveCustomerForm,
@@ -1956,12 +2088,941 @@ $('#lfEye').addEventListener('click', () => {
     $('#lfEye').innerHTML = ic(show ? 'eyeoff' : 'eye', 18);
     $('#lfEye').setAttribute('aria-label', show ? 'Hide password' : 'Show password');
 });
-$$('.demo-chip').forEach(b => b.addEventListener('click', () => {
+$$('.demo-chip[data-demo]').forEach(b => b.addEventListener('click', () => {
     const [u, p] = b.dataset.demo.split('|');
     $('#lfUser').value = u; $('#lfPass').value = p; $('#lfError').textContent = '';
     $('#lfSubmit').focus();
 }));
+$$('#roleTabs button').forEach(b => b.addEventListener('click', () => setLoginRole(b.dataset.role)));
+$('#custLoginForm').addEventListener('submit', e => { e.preventDefault(); customerLogin(); });
+$('#clPhone').addEventListener('input', e => { e.target.value = digits(e.target.value).slice(0, 10); });
+$('#demoCust').addEventListener('click', () => { $('#clName').value = 'Aarav Sharma'; $('#clPhone').value = '9876501234'; $('#clError').textContent = ''; });
 $('#lfForgot').addEventListener('click', e => { e.preventDefault(); toast('Ask an admin to reset it in Settings → Staff accounts'); });
+
+/* ==========================================================================
+   VERSION 2 EXTRAS
+   theme switch · separate Admin / Staff / Customer sign-in · live sync between
+   screens · "collect payment" for online orders · mobile table labels
+   ========================================================================== */
+
+/* ---------- theme: Gold (default) or Black & White ---------- */
+const THEME_KEY = 'fh_theme';
+const BW_COLORS = ['#111111', '#555555', '#999999', '#CCCCCC', '#333333', '#777777', '#AAAAAA', '#DDDDDD'];
+const getTheme = () => document.documentElement.getAttribute('data-theme') === 'bw' ? 'bw' : 'gold';
+const chartCol = i => (getTheme() === 'bw' ? BW_COLORS : CHART_COLORS)[i % CHART_COLORS.length];
+function applyTheme(t, quiet) {
+    const bw = t === 'bw';
+    if (bw) document.documentElement.setAttribute('data-theme', 'bw'); else document.documentElement.removeAttribute('data-theme');
+    try { localStorage.setItem(THEME_KEY, bw ? 'bw' : 'gold'); } catch (e) { /* ignore */ }
+    const meta = $('#metaTheme'); if (meta) meta.setAttribute('content', bw ? '#000000' : '#111111');
+    $$('[data-theme-icon]').forEach(e => { e.textContent = bw ? '◑' : '◐'; });
+    $$('[data-theme-label]').forEach(e => { e.textContent = bw ? 'Gold theme' : 'Black & White theme'; });
+    if (!quiet) {
+        toast(bw ? 'Black & White theme on' : 'Gold theme on');
+        if (state.user) refreshView();           // charts pick up the new colours
+    }
+}
+
+/* ---------- screens (used by CSS to place the assistant button etc.) ---------- */
+function setScreen(s) { document.body.dataset.screen = s; if (s !== 'cust') document.body.classList.remove('k-has-bar', 'k-lock'); }
+
+/* ---------- login: Admin / Staff / Customer ---------- */
+let loginRole = 'admin';
+function setLoginRole(r) {
+    if (!['admin', 'staff', 'customer'].includes(r)) r = 'admin';
+    loginRole = r;
+    try { localStorage.setItem('fh_lastrole', r); } catch (e) { /* ignore */ }
+    const card = $('#loginCard');
+    card.dataset.role = r;
+    $$('#roleTabs button').forEach(b => { const on = b.dataset.role === r; b.classList.toggle('active', on); b.setAttribute('aria-selected', on ? 'true' : 'false'); });
+    $$('.demo-chip[data-for]').forEach(c => { c.style.display = c.dataset.for === r ? '' : 'none'; });
+    $('#lgTitle').textContent = r === 'customer' ? 'Hungry? Let’s order' : r === 'admin' ? 'Admin sign in' : 'Staff sign in';
+    $('#lgSub').innerHTML = r === 'customer' ? `Order food or book a table at <b>${esc(DB.settings.name)}</b>` : r === 'admin' ? `Full control of <b>${esc(DB.settings.name)}</b>` : `Orders, bookings and payments at <b>${esc(DB.settings.name)}</b>`;
+    $('#lfError').textContent = ''; $('#clError').textContent = '';
+    $('#lfUser').value = ''; $('#lfPass').value = '';
+}
+function customerLogin() {
+    const name = $('#clName').value.trim(), ph = digits($('#clPhone').value);
+    const err = m => { $('#clError').textContent = m; const c = $('#loginCard'); c.classList.remove('shake'); void c.offsetWidth; c.classList.add('shake'); };
+    $('#clError').textContent = '';
+    if (name.length < 2) return err('Enter your name');
+    if (ph.length !== 10) return err('Enter a valid 10-digit mobile number');
+    syncDB();
+    findOrCreateCustomer(name, ph); saveDB();
+    const prof = { name, phone: ph };
+    try {
+        const keep = $('#clRemember').checked;
+        (keep ? localStorage : sessionStorage).setItem('fh_customer', JSON.stringify(prof));
+        (keep ? sessionStorage : localStorage).removeItem('fh_customer');
+        localStorage.setItem('fh_cphone', ph);
+    } catch (e) { /* ignore */ }
+    K.enter(prof);
+}
+
+/* ---------- live sync: another tab / window changed the data ---------- */
+let pendingBeep = false;
+function modalOpen() { return !!$('#modalRoot').innerHTML.trim(); }
+function onExternalChange() {
+    if (state.user && modalOpen()) return;                       // never swap data under an open form – the next poll picks it up
+    const before = new Set(DB.orders.map(o => o.id));
+    if (!syncDB()) return;
+    if (!state.user) return;                                     // customer side refreshes itself (K.check)
+    const fresh = DB.orders.filter(o => !before.has(o.id) && o.cashier === 'Online');
+    renderOfferCard(); renderTopbar(); updateBadges(); updateCartUI();
+    const typing = document.activeElement && /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName) && $('#view').contains(document.activeElement);
+    if (!typing && ['dashboard', 'orders', 'bookings', 'payments', 'customers'].includes(state.route)) ROUTES[state.route].render();
+    if (state.route === 'menu') { renderChips(); renderDishGrid(); }
+    if (fresh.length) {
+        const o = fresh[0];
+        toast(`🔔 New online order ${o.id} – ${o.items.reduce((s, i) => s + i.qty, 0)} items, ${money(o.total)}`);
+        beepStaff();
+    }
+}
+window.addEventListener('storage', e => { if (e.key === STORE_KEY) onExternalChange(); });
+setInterval(() => { if (!document.hidden) onExternalChange(); }, 4000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) onExternalChange(); });
+
+/* ---------- payment status helpers + "Collect payment" ---------- */
+const PAY_LABEL = { paid: 'Paid', pending: 'Unpaid', refunded: 'Refunded', void: 'Not charged' };
+const payBadgeClass = s => s === 'paid' ? 'st-completed' : s === 'pending' ? 'st-unpaid st-pending' : s === 'refunded' ? 'st-cancelled' : 'st-cancelled';
+
+function openCollectModal(id, thenComplete) {
+    const o = orderById(id);
+    if (!o) return;
+    openModal({
+        title: 'Collect payment', size: 'sm',
+        body: `<form data-form="collect" data-id="${esc(o.id)}" data-complete="${thenComplete ? '1' : ''}" novalidate>
+      <p class="confirm-msg">Bill <b>${esc(o.id)}</b> · ${esc(o.customerName || 'Walk-in')}<br><span class="muted">Amount to collect</span> <b style="font-size:22px">${money(o.total)}</b></p>
+      <div class="field"><label>Payment method</label>
+        <div class="pay-tabs">${Object.keys(METHOD_LABEL).map((m, i) => `<label class="pt"><input type="radio" name="method" value="${m}" ${i === 0 ? 'checked' : ''} hidden><span>${METHOD_LABEL[m]}</span></label>`).join('')}</div></div>
+      <div class="field"><label>Amount received <small>(cash only, optional)</small></label><input name="tendered" inputmode="decimal" placeholder="${o.total}" autocomplete="off"></div>
+      <div class="field"><label>Reference <small>(card / UPI, optional)</small></label><input name="ref" placeholder="Transaction id" autocomplete="off"></div>
+      <div class="m-foot"><button type="button" class="btn ghost" data-action="modal-close">Cancel</button><button class="btn gold" type="submit">Mark as paid ${money(o.total)}</button></div>
+    </form>`
+    });
+    const f = $('#modalRoot form');
+    const sync = () => { $$('.pt', f).forEach(l => l.classList.toggle('active', l.querySelector('input').checked)); };
+    f.addEventListener('change', sync); sync();
+}
+function collectPaymentForm(form) {
+    syncDB();
+    const f = new FormData(form), o = orderById(form.dataset.id);
+    if (!o) return closeModal();
+    const method = f.get('method') || 'cash';
+    let tendered = 0, change = 0;
+    if (method === 'cash' && String(f.get('tendered') || '').trim()) {
+        tendered = parseFloat(f.get('tendered'));
+        if (isNaN(tendered) || tendered < o.total) return toast('Amount received is less than the bill total', 'error');
+        change = round2(tendered - o.total);
+    }
+    o.method = method; o.paymentStatus = 'paid'; o.tendered = tendered; o.change = change;
+    o.ref = (f.get('ref') || '').trim() || (method === 'cash' ? '' : (method === 'upi' ? 'UPI' : 'CARD') + Math.floor(Math.random() * 9e8 + 1e8));
+    o.cashier = (o.cashier === 'Online' ? 'Online · ' : '') + state.user.name; o.paidAt = new Date().toISOString();
+    if (form.dataset.complete === '1') o.status = 'completed';
+    saveDB(); closeModal(); updateBadges();
+    toast(`${money(o.total)} received for ${o.id}${form.dataset.complete === '1' ? ' – order completed' : ''}`);
+    refreshView();
+}
+
+/* ---------- phones: label every table cell so rows can become cards ---------- */
+function labelTables(root) {
+    $$('table.tbl', root).forEach(t => {
+        const heads = Array.from(t.querySelectorAll('thead th')).map(th => th.textContent.trim());
+        t.querySelectorAll('tbody tr').forEach(tr => Array.from(tr.children).forEach((td, i) => { if (!td.hasAttribute('data-label')) td.setAttribute('data-label', heads[i] || ''); }));
+    });
+}
+(function watchTables() {
+    let raf = 0;
+    const run = () => { raf = 0; labelTables(document); };
+    const mo = new MutationObserver(() => { if (!raf) raf = requestAnimationFrame(run); });
+    ['#view', '#modalRoot'].forEach(s => { const el = $(s); if (el) mo.observe(el, { childList: true, subtree: true }); });
+})();
+
+/* ---------- DEMO DATA TOP-UP (online orders, more bookings) ---------- */
+function addDemoExtras(db) {
+    if (db.demoV2) return;
+    db.demoV2 = true; db.version = 2;
+    const S = Object.assign({}, DEFAULT_SETTINGS, db.settings);
+    const now = new Date(), sod = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const dish = n => db.dishes.find(d => d.name === n);
+    const who = ph => db.customers.find(c => c.phone === ph) || { id: '', name: '', phone: ph };
+    const when = mins => new Date(Math.max(sod.getTime() + 60000, now.getTime() - mins * 60000));
+    const mk = (ph, picks, type, tableId, status, pay, minsAgo, extra) => {
+        const items = picks.map(([n, q]) => { const d = dish(n); return d ? { id: d.id, name: d.name, price: d.price, qty: q, cat: d.cat, veg: d.veg } : null; }).filter(Boolean);
+        if (!items.length) return;
+        const c = who(ph), t = calcTotals(items, type, null, S);
+        db.seq = (db.seq || 1000) + 1;
+        db.orders.push(Object.assign({
+            id: 'FH-' + db.seq, no: db.seq, createdAt: when(minsAgo).toISOString(), items, type, tableId: type === 'dine-in' ? tableId : '',
+            address: type === 'delivery' ? '48 Vijay Nagar Main Rd, Indore' : '', customerId: c.id, customerName: c.name, phone: c.phone, note: '',
+            ...t, method: 'cash', tendered: 0, change: 0, ref: '', paymentStatus: pay, status, cashier: 'Online'
+        }, extra || {}));
+    };
+    /* customer "Aarav" (9876501234) has a live order – log in as him to see tracking */
+    mk('9876501234', [['Paneer Butter Masala', 1], ['Butter Naan', 3], ['Sweet Lassi', 2]], 'dine-in', 't8', 'preparing', 'pending', 12);
+    mk('9822012345', [['Masala Dosa', 2], ['Masala Chai', 2]], 'takeaway', '', 'pending', 'pending', 3);
+    mk('9926123456', [['Chicken Biryani', 2], ['Gulab Jamun', 2]], 'delivery', '', 'ready', 'pending', 30);
+    mk('9981678901', [['Veg Pizza', 1], ['Cold Coffee', 1]], 'takeaway', '', 'completed', 'paid', 26 * 60, { method: 'upi', ref: 'UPI482915306', paidAt: when(26 * 60).toISOString() });
+    mk('9770789012', [['Veg Thali', 2], ['Fresh Lime Soda', 2]], 'dine-in', 't6', 'completed', 'paid', 200, { method: 'cash', tendered: 600, change: 0, paidAt: when(180).toISOString() });
+    mk('9300567890', [['Hakka Noodles', 1], ['Veg Manchurian', 1]], 'delivery', '', 'cancelled', 'void', 40 * 60);
+    db.orders.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    /* more bookings */
+    const day = k => ymd(new Date(now.getFullYear(), now.getMonth(), now.getDate() + k));
+    db.bookings = db.bookings || [];
+    [
+        ['Neha Agarwal', '9981678901', 0, '21:00', 3, 't6', 'Window seat please', 'confirmed'],
+        ['Aditya Rao', '9770789012', 1, '12:30', 2, 't3', '', 'confirmed'],
+        ['Pooja Mishra', '9039012345', 1, '19:30', 10, 't10', 'Family dinner – 2 high chairs', 'confirmed'],
+        ['Karan Joshi', '9300567890', 2, '20:00', 4, 't8', 'Birthday – small cake', 'confirmed'],
+        ['Rahul Khanna', '9827901234', 5, '13:00', 6, 't7', 'Corporate lunch', 'confirmed'],
+        ['Ananya Gupta', '9755456789', -1, '20:30', 4, 't4', '', 'completed'],
+        ['Vikram Singh', '9425345678', -2, '19:00', 2, 't5', 'Cancelled by guest', 'cancelled']
+    ].forEach(([name, phone, off, time, guests, tableId, note, status], i) => {
+        db.bookings.push({ id: 'bd' + (i + 1), name, phone, date: day(off), time, guests, tableId, note, status, createdAt: new Date().toISOString() });
+    });
+}
+
+/* make sure data saved by an older version of the app still works */
+function migrateDB(db) {
+    db.bookings = Array.isArray(db.bookings) ? db.bookings : [];
+    db.customers = Array.isArray(db.customers) ? db.customers : [];
+    db.tables = Array.isArray(db.tables) && db.tables.length ? db.tables : [2, 2, 4, 4, 4, 4, 6, 6, 8, 10].map((s, i) => ({ id: 't' + (i + 1), name: 'T' + (i + 1), seats: s }));
+    db.categories = Array.isArray(db.categories) ? db.categories : ['Breakfast', 'Lunch', 'Dinner', 'Drinks', 'Desserts'];
+    db.orders.forEach(o => { if (!o.paymentStatus) o.paymentStatus = 'paid'; if (!o.items) o.items = []; });
+    addDemoExtras(db);
+    return db;
+}
+
+function beepStaff() {
+    try {
+        const a = new (window.AudioContext || window.webkitAudioContext)(), o = a.createOscillator(), g = a.createGain();
+        o.connect(g); g.connect(a.destination); g.gain.value = .12; o.frequency.value = 660; o.start();
+        setTimeout(() => o.frequency.value = 880, 160); setTimeout(() => { o.stop(); a.close(); }, 380);
+    } catch (e) { /* ignore */ }
+}
+
+/* ==========================================================================
+   CUSTOMER SIDE  (sign in / guest, browse, order, book a table, track + "order ready" alert)
+   Uses the SAME saved database as the staff app:
+     • a customer order appears in staff → Orders (and Dashboard "Live orders") at once
+     • when staff press "Start cooking / Mark ready", the customer is notified
+     • a customer booking appears in staff → Table Booking and blocks that table
+     • customers are created / matched by phone number, so order history is shared
+   (Both sides must run in the same browser – see README "How the data is shared".)
+   ========================================================================== */
+const K = (() => {
+    const A = () => $('#custApp'), q = s => $(s, A());
+    const NK = 'fh_cnotes', PK = 'fh_customer';
+    let cat = 'All', type = 'dine-in', cart = {}, profile = null;
+    try { cart = JSON.parse(localStorage.getItem('fh_ucart') || '{}') || {}; } catch (e) { cart = {}; }
+    try { type = localStorage.getItem('fh_utype') || 'dine-in'; } catch (e) { /* ignore */ }
+    const persist = () => { try { localStorage.setItem('fh_ucart', JSON.stringify(cart)); localStorage.setItem('fh_utype', type); } catch (e) { /* ignore */ } };
+    const loadProfile = () => { try { return JSON.parse(localStorage.getItem(PK) || sessionStorage.getItem(PK) || 'null'); } catch (e) { return null; } };
+    const phone = () => (profile && profile.phone) || localStorage.getItem('fh_cphone') || '';
+    const notes = () => { try { return JSON.parse(localStorage.getItem(NK) || '{}'); } catch (e) { return {}; } };
+    const setNotes = n => { try { localStorage.setItem(NK, JSON.stringify(n)); } catch (e) { /* ignore */ } };
+    const isOpen = () => !A().classList.contains('hidden');
+    const nowMin = () => { const d = new Date(); return d.getHours() * 60 + d.getMinutes(); };
+    const narrow = () => window.matchMedia('(max-width: 820px)').matches;
+
+    const lines = () => Object.entries(cart).map(([id, n]) => { const d = dishById(id); return d && d.available ? { id, name: d.name, price: d.price, qty: n, cat: d.cat, veg: d.veg } : null; }).filter(Boolean);
+    const couponCode = () => { const el = q('#kcCp'); return el ? el.value.trim().toUpperCase() : ''; };
+    const totals = () => { const c = couponCode(); return calcTotals(lines(), type, COUPONS[c] ? c : null); };
+
+    /* ---------- menu ---------- */
+    function draw(anim) {
+        const s = q('#kq').value.toLowerCase().trim(), v = q('#kvf').value;
+        q('#kchips').innerHTML = ['All', ...DB.categories].map(c => `<button class="k-chip ${c === cat ? 'k-on' : ''}" data-cat="${esc(c)}">${esc(c)}</button>`).join('');
+        const list = DB.dishes.filter(d => (cat === 'All' || d.cat === cat) && (d.name + ' ' + (d.desc || '')).toLowerCase().includes(s) && (!v || (v === 'v') === d.veg));
+        q('#kgrid').classList.toggle('k-anim', !!anim);
+        q('#kgrid').innerHTML = list.map((d, i) => {
+            const n = cart[d.id] || 0;
+            return `<article class="k-dish ${d.available ? '' : 'k-sold'}" style="--i:${Math.min(i, 16)}"><div class="k-im">${esc(d.emoji || '🍽️')}${d.img ? `<img src="${esc(d.img)}" alt="${esc(d.name)}" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</div>
+            <div class="k-db"><h3>${esc(d.name)}<i class="k-dot ${d.veg ? 'k-v' : ''}" title="${d.veg ? 'Veg' : 'Non-veg'}"></i></h3><p>${esc(d.desc)}</p><div class="k-row"><b>${money(d.price)}</b>
+            ${!d.available ? '<small>Sold out</small>' : n ? `<div class="k-qty"><button data-chg="${d.id}|-1" aria-label="Remove one">−</button><b>${n}</b><button data-chg="${d.id}|1" aria-label="Add one">+</button></div>` : `<button class="k-add" data-chg="${d.id}|1">Add</button>`}</div></div></article>`;
+        }).join('');
+        q('#kmsg').textContent = list.length ? '' : 'No dishes found. Try another word or category.';
+    }
+
+    /* ---------- basket drawer + sticky bar ---------- */
+    function drawCart() {
+        const L = lines(), t = calcTotals(L, type, null), S = DB.settings;
+        const n = L.reduce((s, l) => s + l.qty, 0);
+        q('#kcn').textContent = n;
+        const need = S.offerOn && t.subtotal > 0 && t.subtotal < S.offerMin ? S.offerMin - t.subtotal : 0;
+        q('#kcl').innerHTML = L.length ? L.map(l => `<div class="k-row"><span>${esc(l.name)}<br><small>${money(l.price)}</small></span><div class="k-qty"><button data-chg="${l.id}|-1" aria-label="Remove one">−</button><b>${l.qty}</b><button data-chg="${l.id}|1" aria-label="Add one">+</button></div><b>${money(l.price * l.qty)}</b></div>`).join('') : '<p style="text-align:center;color:#999;margin-top:40px">🛒<br>Your basket is empty</p>';
+        q('#kcf').innerHTML = L.length ? `${need ? `<small class="k-hint">Add ${money(need)} more to get ${S.offerPct}% off</small>` : ''}<div class="k-tot"><span>Subtotal</span><span>${money(t.subtotal)}</span></div>${t.discount ? `<div class="k-tot"><span>${esc(t.discountLabel)}</span><span>−${money(t.discount)}</span></div>` : ''}<div class="k-tot"><span>GST</span><span>${money(t.tax)}</span></div><div class="k-tot k-b"><span>Total</span><span>${money(t.total)}</span></div><button class="k-btn" data-checkout>Checkout</button>` : '';
+        q('#kBarN').textContent = n + (n === 1 ? ' item' : ' items');
+        q('#kBarT').textContent = money(t.total);
+        q('#kBar').classList.toggle('k-show', n > 0);
+        document.body.classList.toggle('k-has-bar', n > 0 && isOpen() && narrow());
+    }
+    function chg(id, k) {
+        const d = dishById(id);
+        if (k > 0 && d && !d.available) return toast(d.name + ' is sold out', 'error');
+        cart[id] = Math.max(0, Math.min(20, (cart[id] || 0) + k));
+        if (!cart[id]) delete cart[id];
+        persist(); draw(); drawCart();
+        if (k > 0) { const b = q('.k-cartb'); b.classList.remove('k-bump'); void b.offsetWidth; b.classList.add('k-bump'); }
+    }
+
+    /* ---------- panels (drawer + modals) ---------- */
+    function lock() {
+        const any = !!(A().querySelector('.k-modal.k-on') || q('#kdrawer').classList.contains('k-open'));
+        A().classList.toggle('k-lock', any); document.body.classList.toggle('k-lock', any);
+    }
+    const cartOpen = o => { q('#kdrawer').classList.toggle('k-open', !!o); q('#kscrim').classList.toggle('k-on', !!o); lock(); };
+    const close = () => { A().querySelectorAll('.k-modal').forEach(m => m.classList.remove('k-on')); q('#kscrim').classList.remove('k-on'); lock(); };
+    function open(id) {
+        cartOpen(0); close();
+        q('#k' + id).classList.add('k-on'); q('#kscrim').classList.add('k-on'); lock();
+        if (id === 'mBook') slots();
+        if (id === 'mTrack') { const p = q('#ktP'); if (!p.value && phone()) p.value = phone(); track(); }
+    }
+
+    /* ---------- checkout ---------- */
+    function checkout() {
+        const L = lines();
+        if (!L.length) return toast('Your basket is empty', 'error');
+        syncDB();
+        open('mCo');
+        const ph = phone();
+        const mine = ph ? DB.bookings.find(b => b.phone === ph && b.status === 'confirmed' && b.date === todayStr() && Math.abs(minutesOf(b.time) - nowMin()) <= 90) : null;
+        q('#kcTb').innerHTML = DB.tables.map(t => {
+            const st = tableStatus(t), mineHere = mine && mine.tableId === t.id;
+            const busy = st.s === 'occupied' || (st.s === 'reserved' && !mineHere);
+            return `<option value="${t.id}" ${busy ? 'disabled' : ''}>${esc(t.name)} (${t.seats} seats)${st.s === 'occupied' ? ' – occupied now' : busy ? ' – reserved' : mineHere ? ' – your booking' : ''}</option>`;
+        }).join('');
+        const pick = mine ? q('#kcTb option[value="' + mine.tableId + '"]') : Array.from(q('#kcTb').options).find(o => !o.disabled);
+        if (pick) q('#kcTb').value = pick.value;
+        if (!q('#kcName').value) q('#kcName').value = (profile && profile.name) || (mine && mine.name) || '';
+        if (!q('#kcPh').value) q('#kcPh').value = ph;
+        q('#ktyp').querySelectorAll('button').forEach(x => x.classList.toggle('k-on', x.dataset.t === type));
+        upd();
+    }
+    function upd() {
+        if (!q('#kfT')) return;
+        q('#kfT').style.display = type === 'dine-in' ? '' : 'none';
+        q('#kfA').style.display = type === 'delivery' ? '' : 'none';
+        const t = totals();
+        q('#kcS').textContent = money(t.subtotal);
+        q('#kcDr').style.display = t.discount ? '' : 'none';
+        q('#kcDl').textContent = t.discountLabel || 'Discount';
+        q('#kcDv').textContent = '− ' + money(t.discount);
+        q('#kcT').textContent = money(t.total);
+    }
+
+    function place() {
+        syncDB();
+        const name = q('#kcName').value.trim(), ph = digits(q('#kcPh').value), L = lines();
+        if (!L.length) return toast('Your basket is empty', 'error');
+        if (!name) return toast('Enter your name', 'error');
+        if (ph.length !== 10) return toast('Enter a valid 10-digit phone number', 'error');
+        if (type === 'delivery' && q('#kcAd').value.trim().length < 8) return toast('Enter the full delivery address', 'error');
+        let tableId = '';
+        if (type === 'dine-in') {
+            tableId = q('#kcTb').value;
+            if (!tableId) return toast('No table is free right now – choose Takeaway or book a table', 'error');
+            if (tableStatus(tableById(tableId)).s === 'occupied') return toast('That table was just taken – pick another one', 'error');
+        }
+        const code = couponCode();
+        if (code) {
+            const c = COUPONS[code], sub = L.reduce((s, l) => s + l.price * l.qty, 0);
+            if (!c) return toast('That coupon code is not valid', 'error');
+            if (sub < c.min) return toast(`Add ${money(c.min - sub)} more to use ${code}`, 'error');
+        }
+        const c = findOrCreateCustomer(name, ph), t = calcTotals(L, type, code || null);
+        DB.seq++;
+        const o = {
+            id: 'FH-' + DB.seq, no: DB.seq, createdAt: new Date().toISOString(),
+            items: L.map(l => ({ id: l.id, name: l.name, price: l.price, qty: l.qty, cat: l.cat, veg: l.veg })), type,
+            tableId, address: type === 'delivery' ? q('#kcAd').value.trim() : '',
+            customerId: c.id, customerName: c.name, phone: ph, note: q('#kcNo').value.trim(), ...t,
+            method: 'cash', tendered: 0, change: 0, ref: '', paymentStatus: 'pending', status: 'pending', cashier: 'Online'
+        };
+        DB.orders.unshift(o); saveDB();
+        try { localStorage.setItem('fh_cphone', ph); } catch (e) { /* ignore */ }
+        if (profile && !profile.phone) profile.phone = ph;
+        const n = notes(); n[o.id] = 'pending'; setNotes(n);
+        try { if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission(); } catch (e) { /* ignore */ }
+        cart = {}; persist(); q('#kcCp').value = ''; q('#kcNo').value = '';
+        draw(); drawCart(); close();
+        q('#ktP').value = ph;
+        toast('Order ' + o.id + ' placed! We will notify you when it is ready 🔔');
+        open('mTrack');
+    }
+
+    /* ---------- my orders + my bookings ---------- */
+    const STATUS_TXT = { pending: 'Order received', preparing: 'Being prepared 👨‍🍳', ready: 'READY ✅', completed: 'Completed', cancelled: 'Cancelled' };
+    const STEP = { pending: 1, preparing: 2, ready: 3, completed: 4 };
+    function stepper(o) {
+        const n = STEP[o.status] || 0;
+        if (!n) return '';
+        return `<div class="k-steps ${o.status === 'ready' ? 'k-r' : ''}">${[1, 2, 3, 4].map(i => `<i class="${i <= n ? 'k-d' : ''}" style="--n:${i - 1}"></i>`).join('')}</div>
+        <div class="k-stl"><span>Received</span><span>Cooking</span><span>Ready</span><span>Done</span></div>`;
+    }
+    function track() {
+        syncDB();
+        const ph = digits(q('#ktP').value), ok = ph.length === 10;
+        const L = ok ? DB.orders.filter(o => o.phone === ph).slice(0, 10) : null;
+        q('#ktR').innerHTML = !L ? '<small>Enter the phone number used while ordering.</small>' : L.length ? L.map(o => `<div class="k-ocard"><div class="k-row"><b>${esc(o.id)}</b><span class="k-st k-${o.status}">${STATUS_TXT[o.status] || o.status}</span></div>${stepper(o)}<span>${o.items.map(i => i.qty + '× ' + esc(i.name)).join(', ')}</span><div class="k-row"><small>${fmtDT(o.createdAt)} · ${TYPE_LABEL[o.type] || o.type}${o.tableId ? ' · ' + esc((tableById(o.tableId) || {}).name || '') : ''}</small><b>${money(o.total)}</b></div><small>${o.paymentStatus === 'paid' ? 'Paid ✔' : o.paymentStatus === 'refunded' ? 'Refunded' : o.status === 'cancelled' ? 'Not charged' : 'Pay at the restaurant / on delivery'}</small></div>`).join('') : '<small>No orders found for this number.</small>';
+        const today = todayStr();
+        const B = ok ? DB.bookings.filter(b => b.phone === ph && b.status !== 'completed' && (b.status === 'confirmed' ? b.date >= today : b.date >= today)).sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time)).slice(0, 8) : [];
+        q('#ktB').innerHTML = !ok ? '' : B.length ? B.map(b => `<div class="k-bk"><div class="k-row"><b>${b.date === today ? 'Today' : fmtD(b.date)} · ${fmtT(b.time)}</b><span class="k-st ${b.status === 'confirmed' ? 'k-ready' : 'k-cancelled'}">${b.status === 'confirmed' ? 'Confirmed' : 'Cancelled'}</span></div><span>${b.guests} guest${b.guests > 1 ? 's' : ''} · Table ${esc((tableById(b.tableId) || {}).name || '-')}${b.note ? ' · ' + esc(b.note) : ''}</span>${b.status === 'confirmed' ? `<button class="k-mini" onclick="K.cancelBooking('${b.id}')">Cancel booking</button>` : ''}</div>`).join('') : '<small>No upcoming bookings.</small>';
+    }
+    function cancelBooking(id) {
+        syncDB();
+        const b = DB.bookings.find(x => x.id === id);
+        if (!b || !confirm('Cancel your booking for ' + fmtD(b.date) + ' at ' + fmtT(b.time) + '?')) return;
+        b.status = 'cancelled'; saveDB(); toast('Booking cancelled'); track();
+    }
+
+    /* ---------- table booking ---------- */
+    function slots() {
+        const dEl = q('#kbD'), sel = q('#kbTm');
+        if (!dEl.value || dEl.value < todayStr()) dEl.value = todayStr();
+        const d = dEl.value, now = nowMin();
+        Array.from(sel.options).forEach(o => { o.disabled = d === todayStr() && minutesOf(o.value) <= now; });
+        if (sel.selectedOptions[0] && sel.selectedOptions[0].disabled) { const f = Array.from(sel.options).find(o => !o.disabled); if (f) sel.value = f.value; }
+        const hint = q('#kbHint'), g = +q('#kbG').value || 1;
+        if (sel.selectedOptions[0] && sel.selectedOptions[0].disabled) { hint.textContent = 'No time slots are left today – pick another date'; hint.className = 'k-hint k-bad'; return; }
+        const free = DB.tables.filter(t => t.seats >= g && !bookingConflict(t.id, d, sel.value));
+        hint.className = 'k-hint' + (free.length ? '' : ' k-bad');
+        hint.textContent = free.length ? `✅ ${free.length} table${free.length > 1 ? 's' : ''} free for ${g} guest${g > 1 ? 's' : ''} at ${fmtT(sel.value)}` : `❌ Fully booked at ${fmtT(sel.value)} for ${g} guests – try another time`;
+    }
+    function book() {
+        syncDB();
+        const n = q('#kbN').value.trim(), p = digits(q('#kbP').value), d = q('#kbD').value, tm = q('#kbTm').value, g = parseInt(q('#kbG').value, 10) || 0;
+        const maxSeats = Math.max(...DB.tables.map(t => t.seats));
+        if (!n) return toast('Enter your name', 'error');
+        if (p.length !== 10) return toast('Enter a valid 10-digit phone number', 'error');
+        if (!d || d < todayStr()) return toast('Choose today or a future date', 'error');
+        if (!tm || (d === todayStr() && minutesOf(tm) <= nowMin())) return toast('Pick a time that has not passed', 'error');
+        if (g < 1) return toast('Enter the number of guests', 'error');
+        if (g > maxSeats) return toast(`We seat up to ${maxSeats} guests online – please call us for bigger groups`, 'error');
+        if (DB.bookings.some(b => b.phone === p && b.status === 'confirmed' && b.date === d && Math.abs(minutesOf(b.time) - minutesOf(tm)) < 90)) return toast('You already have a booking around that time', 'error');
+        const tb = DB.tables.filter(t => t.seats >= g).sort((a, b) => a.seats - b.seats).find(t => !bookingConflict(t.id, d, tm));
+        if (!tb) return toast('No table is free at that time – try another slot', 'error');
+        DB.bookings.push({ id: uid('b'), name: n, phone: p, date: d, time: tm, guests: g, tableId: tb.id, note: q('#kbNo').value.trim(), status: 'confirmed', source: 'online', createdAt: new Date().toISOString() });
+        findOrCreateCustomer(n, p);
+        saveDB();
+        try { localStorage.setItem('fh_cphone', p); } catch (e) { /* ignore */ }
+        q('#ktP').value = p; q('#kbNo').value = '';
+        toast(`Table ${tb.name} booked for ${fmtD(d)} at ${fmtT(tm)} ✅`);
+        open('mTrack');
+    }
+
+    /* ---------- "order ready" notification ---------- */
+    function beep() {
+        try {
+            const a = new (window.AudioContext || window.webkitAudioContext)(), o = a.createOscillator(), g = a.createGain();
+            o.connect(g); g.connect(a.destination); g.gain.value = .15; o.frequency.value = 880; o.start();
+            setTimeout(() => o.frequency.value = 1175, 200); setTimeout(() => { o.stop(); a.close(); }, 450);
+        } catch (e) { /* ignore */ }
+    }
+    function readyAlert(o) {
+        const where = o.type === 'dine-in' ? 'It will be served at your table.' : o.type === 'delivery' ? 'It is on its way to you.' : 'Please collect it at the counter.';
+        const msg = `🔔 Your order ${o.id} is READY! ${where}`;
+        $('#kBannerTxt').textContent = msg; $('#kBanner').classList.add('k-on');
+        beep(); try { navigator.vibrate && navigator.vibrate([250, 120, 250]); } catch (e) { /* ignore */ }
+        try { if ('Notification' in window && Notification.permission === 'granted') new Notification(DB.settings.name, { body: msg }); } catch (e) { /* ignore */ }
+    }
+    function check() {
+        if (!isOpen()) return;
+        const changed = syncDB();
+        if (changed) { draw(); drawCart(); }
+        const ph = phone();
+        if (!ph) return;
+        const seen = notes(); let ch = false;
+        DB.orders.filter(o => o.phone === ph).forEach(o => {
+            if (seen[o.id] === o.status) return;
+            const known = seen[o.id] !== undefined, fresh = Date.now() - new Date(o.createdAt) < 6 * 36e5;
+            if (o.status === 'ready' && (known || fresh)) readyAlert(o);
+            else if (o.status === 'preparing' && known) toast(`👨‍🍳 Order ${o.id} is being prepared`);
+            else if (o.status === 'cancelled' && known) toast(`Order ${o.id} was cancelled`, 'error');
+            seen[o.id] = o.status; ch = true;
+        });
+        if (ch) setNotes(seen);
+        if ((ch || changed) && q('#kmTrack').classList.contains('k-on')) track();
+    }
+
+    /* ---------- enter / leave ---------- */
+    function enter(p) {
+        profile = p && p.phone ? { name: p.name || '', phone: digits(p.phone) } : null;
+        syncDB();
+        $('#login').classList.add('hidden'); $('#app').classList.add('hidden');
+        A().classList.remove('hidden');
+        document.body.dataset.screen = 'cust';
+        const first = profile && profile.name ? profile.name.split(' ')[0] : '';
+        q('#kHi').textContent = first ? `Welcome back, ${first} 👋` : `Welcome to ${DB.settings.name} 👋`;
+        q('.k-head h1').textContent = '🍴 ' + DB.settings.name;
+        q('#kOut').style.display = profile ? '' : 'none';
+        try { history.replaceState(null, '', '#customer'); } catch (e) { /* ignore */ }
+        A().scrollTop = 0;
+        draw(1); drawCart(); check();
+    }
+    function exit(role) {
+        A().classList.add('hidden'); close(); cartOpen(0);
+        document.body.classList.remove('k-has-bar');
+        $('#login').classList.remove('hidden');
+        document.body.dataset.screen = 'login';
+        try { history.replaceState(null, '', location.pathname); } catch (e) { /* ignore */ }
+        setLoginRole(typeof role === 'string' ? role : 'admin');
+    }
+    function signout() {
+        try { localStorage.removeItem(PK); sessionStorage.removeItem(PK); localStorage.removeItem('fh_cphone'); } catch (e) { /* ignore */ }
+        profile = null;
+        exit('customer');
+    }
+    function init() {
+        q('#kbTm').innerHTML = SLOTS.map(x => `<option value="${x}" ${x === '20:00' ? 'selected' : ''}>${fmtT(x)}</option>`).join('');
+        q('#kbD').min = q('#kbD').value = todayStr();
+        A().addEventListener('click', e => {
+            const t = e.target;
+            let b = t.closest('[data-chg]'); if (b) { const [id, k] = b.dataset.chg.split('|'); return chg(id, +k); }
+            b = t.closest('[data-cat]'); if (b) { cat = b.dataset.cat; return draw(1); }
+            if (t.closest('[data-checkout]')) return checkout();
+            b = t.closest('#ktyp button'); if (b) { type = b.dataset.t; persist(); A().querySelectorAll('#ktyp button').forEach(x => x.classList.toggle('k-on', x === b)); upd(); drawCart(); }
+        });
+        $('#goCust').addEventListener('click', () => enter(null));
+        window.addEventListener('storage', e => { if (e.key === STORE_KEY) check(); });
+        document.addEventListener('visibilitychange', check);
+        document.addEventListener('keydown', e => { if (e.key === 'Escape' && isOpen()) { cartOpen(0); close(); } });
+        setInterval(check, 4000);
+    }
+    return {
+        init, enter, exit, signout, draw, cart: cartOpen, open, close, place, track, book, slots, upd, cancelBooking, loadProfile,
+        add: id => chg(id, 1), isOpen, dismiss: () => $('#kBanner').classList.remove('k-on'),
+        profile: () => profile, refresh: () => { draw(); drawCart(); }
+    };
+})();
+
+/* ==========================================================================
+   FLAVORBOT  –  the built-in help assistant
+   --------------------------------------------------------------------------
+   Runs 100% inside this file (no server, no API key, works offline).
+   How it "thinks":
+     1. the question is cleaned and split into words (English, Hinglish, हिंदी)
+     2. every intent below has keywords with weights; spelling mistakes are
+        forgiven (fuzzy match) and the best scoring intent wins
+     3. dish names, prices, order numbers, phone numbers, times and guest
+        counts are pulled out of the sentence, and the answer is built from the
+        LIVE data in the database (menu, offers, tables, bookings, orders)
+   It knows who is asking: customers get menu / order / booking help, staff get
+   how-to help, and only staff & admin can ask for sales numbers.
+   To teach it something new, add an entry to INTENTS (see README).
+   ========================================================================== */
+const BOT = (() => {
+    const CHAT_KEY = 'fh_bot_chat_v2', ROLE_KEY = 'fh_bot_role', SEEN_KEY = 'fh_bot_seen';
+    let msgs = [], isOpen = false, lang = 'en', pending = null;
+
+    /* ---------- who is asking ---------- */
+    const role = () => state.user ? state.user.role : (K.isOpen() ? 'customer' : 'guest');
+    const staffy = () => role() === 'admin' || role() === 'staff';
+    const myPhone = () => { const p = K.profile && K.profile(); return (p && p.phone) || localStorage.getItem('fh_cphone') || ''; };
+
+    /* ---------- text helpers ---------- */
+    const hasHindi = t => /[\u0900-\u097F]/.test(t);
+    const norm = t => String(t || '').toLowerCase().normalize('NFC').replace(/[^\p{L}\p{M}\p{N}\s:₹]/gu, ' ').replace(/\s+/g, ' ').trim();
+    const L = (en, hi) => (lang === 'hi' && hi) ? hi : en;
+    const ul = a => '<ul>' + a.map(x => '<li>' + x + '</li>').join('') + '</ul>';
+    const plural = (n, w) => n + ' ' + w + (n === 1 ? '' : 's');
+    function lev(a, b) {
+        if (Math.abs(a.length - b.length) > 2) return 9;
+        const d = Array.from({ length: a.length + 1 }, (_, i) => [i]);
+        for (let j = 1; j <= b.length; j++) d[0][j] = j;
+        for (let i = 1; i <= a.length; i++) for (let j = 1; j <= b.length; j++)
+            d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+        return d[a.length][b.length];
+    }
+    const near = (w, k) => w === k || (k.length >= 5 && w.length >= 4 && lev(w, k) <= (k.length >= 8 ? 2 : 1));
+
+    /* ---------- parse "table for 4 tomorrow at 8 pm" ---------- */
+    function parseWhen(raw) {
+        const t = norm(raw), out = {};
+        let m = t.match(/(?:for|के लिए|ke liye)\s*(\d{1,2})\b/) || t.match(/\b(\d{1,2})\s*(?:people|persons|person|guests|guest|pax|members|log|लोग|जन|लोगों)/) || t.match(/\b(\d{1,2})\s*(?:के लिए|ke liye)/);
+        if (m) out.guests = Math.min(+m[1], 40);
+        let h = null, mi = 0;
+        m = t.match(/\b(\d{1,2})(?::(\d{2}))?\s*(am|pm|a m|p m)\b/);
+        if (m) { h = +m[1]; mi = +(m[2] || 0); if (/p/.test(m[3]) && h < 12) h += 12; if (/a/.test(m[3]) && h === 12) h = 0; }
+        else if ((m = t.match(/\b([01]?\d|2[0-3]):([0-5]\d)\b/))) { h = +m[1]; mi = +m[2]; }
+        else if ((m = t.match(/\b(\d{1,2})\s*(?:बजे|baje|bje|o clock|oclock)/)) || (m = t.match(/\bat\s*(\d{1,2})\b/)) || (m = t.match(/\bबजे\s*(\d{1,2})\b/))) {
+            h = +m[1]; if (h >= 1 && h <= 10) h += 12;
+        }
+        if (h !== null && h < 24) out.time = pad(h) + ':' + (mi >= 30 ? '30' : '00');
+        const d0 = new Date();
+        const add = n => { const d = new Date(d0.getFullYear(), d0.getMonth(), d0.getDate() + n); return ymd(d); };
+        if (/day after|parso|परसों|परसो/.test(t)) out.date = add(2);
+        else if (/tomorrow|tmrw|tomorow|\bkal\b|कल/.test(t)) out.date = add(1);
+        else if (/today|tonight|\baaj\b|आज/.test(t)) out.date = add(0);
+        else if ((m = t.match(/\b(20\d\d)-(\d{1,2})-(\d{1,2})\b/))) out.date = `${m[1]}-${pad(m[2])}-${pad(m[3])}`;
+        return out;
+    }
+
+    /* ---------- dish matching ---------- */
+    const STOP = new Set('a an the of is are to for me my i you your do does can what which how much many tell about show give price cost rate rs rupees rupee kitna kitne kya hai hain ka ki ke ko me mein ye woh this that please pls any some and or with in on at best good veg non menu item items dish dishes food order add want need available have has there it under below above less more than cheap cheapest price prices ₹ क्या है का की के में को कितना कीमत दाम मेन्यू'.split(' '));
+    const GENERIC = ['veg', 'fresh', 'sweet', 'masala', 'butter', 'chicken', 'paneer'];
+    function findDishes(text) {
+        const q = norm(text).split(' ').filter(w => w.length > 1 && !STOP.has(w));
+        if (!q.length) return [];
+        const onlyGeneric = q.every(w => GENERIC.some(g => near(w, g)));
+        const scored = DB.dishes.map(d => {
+            const toks = norm(d.name).split(' ');
+            let hit = 0, strong = 0;
+            toks.forEach(tk => { if (q.some(w => near(w, tk))) { hit++; if (!GENERIC.includes(tk) || toks.length === 1 || onlyGeneric) strong++; } });
+            if (!hit) return null;
+            const full = hit === toks.length;
+            return { d, score: hit / toks.length + (full ? 1 : 0) + (strong ? .2 : 0), full, strong };
+        }).filter(Boolean).sort((a, b) => b.score - a.score);
+        if (!scored.length) return [];
+        const best = scored[0];
+        if (best.full) return scored.filter(s => s.full && s.score >= best.score - .01).slice(0, 4).map(s => s.d);
+        return scored.filter(s => s.score >= Math.max(.5, best.score - .3) && s.strong).slice(0, 4).map(s => s.d);
+    }
+    function dishCardHTML(d) {
+        const where = DB.categories.includes(d.cat) ? d.cat : '';
+        return L(`<b>${esc(d.name)}</b> ${esc(d.emoji || '')} – ${money(d.price)} (${d.veg ? 'Veg' : 'Non-veg'})<br>${esc(d.desc)}<br><small>${esc(where)} · ${d.available ? 'Available today' : 'Sold out right now'}</small>`,
+            `<b>${esc(d.name)}</b> ${esc(d.emoji || '')} – ${money(d.price)} (${d.veg ? 'शाकाहारी' : 'मांसाहारी'})<br>${esc(d.desc)}<br><small>${esc(where)} · ${d.available ? 'आज उपलब्ध' : 'अभी खत्म है'}</small>`);
+    }
+    const addAct = d => d.available ? [{ id: 'add:' + d.id, label: '+ ' + L('Add', 'जोड़ें') + ' ' + d.name }] : [];
+    const dishLine = d => `${esc(d.name)} – ${money(d.price)} ${d.veg ? '🟢' : '🔴'}`;
+    function popular(n) {
+        const top = topDishes(DB.orders, 30).map(t => dishById(t.id)).filter(d => d && d.available);
+        return (top.length ? top : DB.dishes.filter(d => d.available)).slice(0, n);
+    }
+
+    /* ---------- order + booking lookups ---------- */
+    const statusWord = s => ({ pending: L('received', 'मिल गया'), preparing: L('being prepared', 'बन रहा है'), ready: L('READY', 'तैयार है'), completed: L('completed', 'पूरा हुआ'), cancelled: L('cancelled', 'रद्द हुआ') }[s] || s);
+    function orderLine(o) {
+        const pay = o.paymentStatus === 'paid' ? L('paid', 'भुगतान हो गया') : o.paymentStatus === 'pending' ? L('pay at the restaurant', 'रेस्टोरेंट पर भुगतान') : o.paymentStatus;
+        return `<b>${esc(o.id)}</b> – ${statusWord(o.status)}<br><small>${o.items.map(i => i.qty + '× ' + esc(i.name)).join(', ')} · ${money(o.total)} · ${pay} · ${timeAgo(o.createdAt)}</small>`;
+    }
+    function trackAnswer(text) {
+        const idm = text.match(/fh\s*-?\s*(\d{3,6})/i), ph = digits(text).length >= 10 ? digits(text).slice(-10) : (idm ? '' : '');
+        if (idm) {
+            const o = DB.orders.find(x => x.id === 'FH-' + idm[1]);
+            return o ? { h: orderLine(o), a: [] } : { h: L(`I can't find order FH-${idm[1]}. Check the number on your bill.`, `ऑर्डर FH-${idm[1]} नहीं मिला। बिल पर नंबर जाँच लें।`) };
+        }
+        const p = ph || (staffy() ? '' : myPhone());
+        if (p) {
+            const list = DB.orders.filter(o => o.phone === p).slice(0, 3);
+            return list.length ? { h: L(`Latest orders for ${p}:`, `${p} के ताज़ा ऑर्डर:`) + ul(list.map(orderLine)), a: [{ id: 'cust:track', label: L('Open My Orders', 'मेरे ऑर्डर खोलें') }] } : { h: L(`No orders found for ${p}.`, `${p} के लिए कोई ऑर्डर नहीं मिला।`) };
+        }
+        if (staffy()) { const live = DB.orders.filter(o => ACTIVE.includes(o.status)); return { h: L(`There ${live.length === 1 ? 'is' : 'are'} ${plural(live.length, 'live order')} right now.`, `अभी ${live.length} लाइव ऑर्डर हैं।`), a: [{ id: 'go:orders', label: 'Open Orders' }] }; }
+        pending = 'track';
+        return { h: L('Sure! Send me your order number (like FH-1005) or the 10-digit phone number you ordered with.', 'ज़रूर! अपना ऑर्डर नंबर (जैसे FH-1005) या 10 अंकों का फ़ोन नंबर भेजें।') };
+    }
+    function availability(text) {
+        const w = parseWhen(text), g = w.guests || 2, d = w.date || todayStr();
+        let tm = w.time || '20:00';
+        if (!SLOTS.includes(tm)) tm = minutesOf(tm) < 660 ? '11:00' : '22:00';
+        if (d < todayStr()) return { h: L('That date has already passed – pick today or a later date.', 'वह तारीख निकल चुकी है – आज या आगे की तारीख चुनें।') };
+        const nowM = new Date().getHours() * 60 + new Date().getMinutes();
+        if (d === todayStr() && minutesOf(tm) <= nowM && !w.time) tm = SLOTS.find(s => minutesOf(s) > nowM) || '22:00';
+        if (d === todayStr() && minutesOf(tm) <= nowM) return { h: L(`${fmtT(tm)} has already passed today. Try a later time or another day.`, `आज ${fmtT(tm)} का समय निकल चुका है। बाद का समय या दूसरा दिन चुनें।`) };
+        const free = t => t.seats >= g && !bookingConflict(t.id, d, tm);
+        const ok = DB.tables.filter(free);
+        const when = `${d === todayStr() ? L('today', 'आज') : fmtD(d)} ${L('at', '')} ${fmtT(tm)}`;
+        const acts = [{ id: 'book', label: L('Book a table', 'टेबल बुक करें') }];
+        if (ok.length) return { h: L(`✅ Yes! ${plural(ok.length, 'table')} ${ok.length === 1 ? 'is' : 'are'} free for ${plural(g, 'guest')} ${when}: ${ok.slice(0, 4).map(t => t.name + ' (' + t.seats + ' seats)').join(', ')}.`, `✅ हाँ! ${when} ${g} लोगों के लिए ${ok.length} टेबल खाली हैं: ${ok.slice(0, 4).map(t => t.name + ' (' + t.seats + ' सीट)').join(', ')}।`), a: acts };
+        const alt = SLOTS.filter(s => (d !== todayStr() || minutesOf(s) > nowM) && DB.tables.some(t => t.seats >= g && !bookingConflict(t.id, d, s))).sort((a, b) => Math.abs(minutesOf(a) - minutesOf(tm)) - Math.abs(minutesOf(b) - minutesOf(tm))).slice(0, 3);
+        return { h: L(`❌ No table for ${plural(g, 'guest')} is free ${when}.` + (alt.length ? ` Closest free times: <b>${alt.map(fmtT).join(', ')}</b>.` : ' Try another day.'), `❌ ${when} ${g} लोगों के लिए कोई टेबल खाली नहीं है।` + (alt.length ? ` नज़दीकी खाली समय: <b>${alt.map(fmtT).join(', ')}</b>।` : ' कोई और दिन चुनें।')), a: acts };
+    }
+    function priceFilter(text) {
+        const t = norm(text);
+        let m = t.match(/(?:under|below|less than|within|upto|up to|max|budget|से कम|tak|तक)\s*₹?\s*(\d{2,5})/) || t.match(/₹?\s*(\d{2,5})\s*(?:से कम|tak|तक|ke andar|के अंदर|or less)/) || t.match(/₹\s*(\d{2,5})/);
+        const cap = m ? +m[1] : (/cheap|sasta|सस्ता|budget/.test(t) ? 120 : 0);
+        const veg = /\bveg\b|vegetarian|शाकाहारी|शाकाहार|pure veg/.test(t) && !/non[\s-]?veg|मांसाहारी/.test(t);
+        const nonveg = /non[\s-]?veg|chicken|egg|मांसाहारी|नॉन/.test(t);
+        const cats = DB.categories.filter(c => t.includes(c.toLowerCase()));
+        let list = DB.dishes.filter(d => d.available && (!cap || d.price <= cap) && (!veg || d.veg) && (!nonveg || !d.veg) && (!cats.length || cats.includes(d.cat)));
+        list.sort((a, b) => cap || /cheap|sasta|सस्ता/.test(t) ? a.price - b.price : 0);
+        return { list, cap, veg, nonveg, cats };
+    }
+
+    /* ---------- staff data ---------- */
+    function salesToday() {
+        const s = sumOrders(DB.orders.filter(o => orderDay(o) === todayStr()));
+        const unpaid = DB.orders.filter(o => orderDay(o) === todayStr() && o.paymentStatus === 'pending' && o.status !== 'cancelled');
+        return L(`Today: <b>${money(s.revenue)}</b> from ${plural(s.count, 'paid order')} (${s.items} items, GST ${money(s.tax)}).` + (unpaid.length ? `<br>${plural(unpaid.length, 'order')} (${money(unpaid.reduce((a, o) => a + o.total, 0))}) still unpaid.` : ''));
+    }
+
+    /* ---------- the knowledge base ---------- */
+    /* k: [keyword, weight]  – hindi (Devanagari) keywords match as substrings, english ones as whole/fuzzy words */
+    const INTENTS = [
+        {
+            id: 'greet', k: [['hi', 3], ['hello', 3], ['hey', 3], ['namaste', 4], ['namaskar', 4], ['good morning', 4], ['good evening', 4], ['नमस्ते', 4], ['हेलो', 3], ['नमस्कार', 4], ['hii', 3]],
+            fn: () => ({ h: L(`Hello${(K.profile && K.profile() && K.profile().name) ? ', ' + esc(K.profile().name.split(' ')[0]) : ''}! 👋 I'm FlavorBot, the ${esc(DB.settings.name)} assistant. Ask me about the menu, prices, offers, table booking or your order.`, 'नमस्ते! 👋 मैं FlavorBot हूँ। मुझसे मेन्यू, कीमत, ऑफर, टेबल बुकिंग या अपने ऑर्डर के बारे में पूछें।') })
+        },
+        { id: 'thanks', k: [['thanks', 4], ['thank you', 4], ['thx', 3], ['shukriya', 4], ['dhanyavad', 4], ['धन्यवाद', 4], ['शुक्रिया', 4], ['great', 1], ['awesome', 1]], fn: () => ({ h: L("You're welcome! 😊 Anything else I can help with?", 'आपका स्वागत है! 😊 और कुछ पूछना है?') }) },
+        { id: 'bye', k: [['bye', 4], ['goodbye', 4], ['see you', 3], ['alvida', 4], ['अलविदा', 4]], fn: () => ({ h: L('Goodbye! Come back hungry 🍽️', 'फिर मिलेंगे! भूखे आइएगा 🍽️') }) },
+        {
+            id: 'help', k: [['help', 3], ['what can you do', 6], ['how can you help', 6], ['commands', 3], ['options', 2], ['मदद', 4], ['सहायता', 4], ['क्या कर सकते', 5], ['madad', 4]],
+            fn: () => ({ h: staffy() ? L('I can help with: today\'s numbers (orders, tables, bookings), how-to steps (add a dish, collect payment, refunds, GST, staff accounts, backup), and menu questions. Try one of the buttons below.') : L('I can help with: 🍛 dish details & prices, 🥗 veg / budget suggestions, 🏷️ offers & coupons, 📅 table booking & availability, 📦 order tracking, 🕒 timings, 💳 payments, 🚚 delivery.', 'मैं बता सकता हूँ: 🍛 डिश और कीमत, 🥗 शाकाहारी/बजट सुझाव, 🏷️ ऑफर, 📅 टेबल बुकिंग, 📦 ऑर्डर ट्रैकिंग, 🕒 समय, 💳 भुगतान, 🚚 डिलीवरी।') })
+        },
+        {
+            id: 'about', k: [['who are you', 6], ['your name', 5], ['are you ai', 6], ['are you a bot', 6], ['are you human', 6], ['chatgpt', 3], ['तुम कौन', 5], ['आप कौन', 5], ['kaun ho', 5]],
+            fn: () => ({ h: L("I'm FlavorBot 🤖 – a built-in assistant that lives inside this app. I'm not connected to the internet or a large AI model: I answer from this restaurant's own live data (menu, offers, tables, bookings, orders) using smart keyword matching, so my answers are always about <b>this</b> restaurant.", 'मैं FlavorBot 🤖 हूँ – इसी ऐप में बना असिस्टेंट। मैं इंटरनेट या किसी बड़े AI मॉडल से नहीं जुड़ा हूँ; मैं इस रेस्टोरेंट के लाइव डेटा (मेन्यू, ऑफर, टेबल, बुकिंग, ऑर्डर) से जवाब देता हूँ।') })
+        },
+        {
+            id: 'hours', k: [['timing', 5], ['timings', 5], ['opening hours', 6], ['open', 2], ['close', 2], ['closing', 4], ['hours', 3], ['what time', 3], ['kab', 3], ['khula', 4], ['khulta', 4], ['samay', 3], ['समय', 4], ['टाइमिंग', 5], ['कब खुल', 5], ['कब तक', 4], ['खुला', 4], ['बंद', 3]],
+            fn: () => ({ h: L(`We are open <b>daily, 11:00 AM – 10:30 PM</b>. Table bookings can be made for 11:00 AM – 10:00 PM.`, `हम <b>रोज़ सुबह 11:00 से रात 10:30 बजे तक</b> खुले हैं। टेबल बुकिंग 11:00 AM – 10:00 PM के बीच हो सकती है।`) })
+        },
+        {
+            id: 'contact', k: [['address', 5], ['location', 4], ['where are you', 6], ['where is', 3], ['phone', 4], ['contact', 5], ['call', 3], ['email', 4], ['directions', 4], ['number', 2], ['पता', 5], ['कहाँ', 3], ['कहां', 3], ['फोन', 4], ['नंबर', 3], ['sampark', 4], ['kahan', 3], ['pata', 4]],
+            fn: () => { const S = DB.settings; return { h: L(`📍 ${esc(S.address)}<br>📞 ${esc(S.phone)}<br>✉️ ${esc(S.email)}`, `📍 ${esc(S.address)}<br>📞 ${esc(S.phone)}<br>✉️ ${esc(S.email)}`) }; }
+        },
+        {
+            id: 'menu', k: [['menu', 5], ['categories', 4], ['category', 4], ['what do you have', 6], ['what food', 5], ['dishes', 3], ['मेन्यू', 5], ['क्या मिलता', 5], ['क्या क्या', 4], ['khana', 3], ['kya milta', 5]],
+            fn: () => { const c = DB.categories.map(cn => `<b>${esc(cn)}</b> (${DB.dishes.filter(d => d.cat === cn && d.available).length})`).join(' · '); return { h: L(`Our menu has ${DB.dishes.length} dishes: ${c}.<br>Ask me for e.g. "veg dishes under ₹150", "desserts" or the price of any dish.`, `हमारे मेन्यू में ${DB.dishes.length} डिश हैं: ${c}।<br>आप पूछ सकते हैं जैसे "₹150 से कम शाकाहारी", "डेज़र्ट" या किसी डिश की कीमत।`), a: staffy() ? [{ id: 'go:menu', label: 'Open Menu' }] : [{ id: 'cust:menu', label: L('See the menu', 'मेन्यू देखें') }] }; }
+        },
+        {
+            id: 'popular', k: [['popular', 5], ['best seller', 6], ['bestseller', 6], ['best sellers', 6], ['recommend', 5], ['suggest', 5], ['special', 3], ['famous', 4], ['must try', 6], ['most ordered', 6], ['top dishes', 6], ['what should i order', 7], ['पॉपुलर', 5], ['सुझाव', 5], ['स्पेशल', 3], ['मशहूर', 4], ['kya khayein', 5]],
+            fn: () => { const p = popular(5); return { h: L('Most-loved dishes right now:', 'अभी सबसे पसंदीदा डिश:') + ul(p.map(dishLine)), a: p.slice(0, 3).flatMap(addAct) }; }
+        },
+        {
+            id: 'offers', k: [['offer', 5], ['offers', 5], ['discount', 5], ['coupon', 5], ['coupons', 5], ['promo', 4], ['promo code', 6], ['deal', 3], ['deals', 3], ['save', 2], ['cheaper', 2], ['ऑफर', 5], ['छूट', 5], ['डिस्काउंट', 5], ['कूपन', 5], ['chhoot', 4], ['discount code', 6]],
+            fn: () => { const S = DB.settings; const cp = Object.entries(COUPONS).map(([k, v]) => `<b>${k}</b> – ${v.text}`); return { h: L((S.offerOn ? `🏷️ <b>${S.offerPct}% OFF</b> automatically on orders above ${money(S.offerMin)}.<br>` : 'No automatic offer is running right now.<br>') + 'Coupon codes (type one in the basket / checkout):' + ul(cp) + '<small>The bigger saving of the offer and the coupon is applied – they do not stack.</small>', (S.offerOn ? `🏷️ ${money(S.offerMin)} से ऊपर के ऑर्डर पर अपने-आप <b>${S.offerPct}% छूट</b>।<br>` : '') + 'कूपन कोड:' + ul(cp) + '<small>ऑफर और कूपन में से जो ज़्यादा बचत दे वही लगता है।</small>') }; }
+        },
+        {
+            id: 'delivery', k: [['delivery', 5], ['deliver', 4], ['home delivery', 6], ['takeaway', 4], ['take away', 4], ['pickup', 4], ['dine in', 3], ['dine-in', 3], ['delivery charge', 6], ['डिलीवरी', 5], ['होम डिलीवरी', 6], ['टेकअवे', 4], ['ghar', 2]],
+            fn: () => { const S = DB.settings; return { h: L(`We offer 3 ways to order:${ul([`<b>Dine-in</b> – pick a table, we serve you there`, `<b>Takeaway</b> – collect at the counter when it is ready`, `<b>Home delivery</b> – ${S.deliveryFee ? money(S.deliveryFee) + ' delivery charge' : 'free'}; a delivery address and phone number are needed`])}`, `ऑर्डर के 3 तरीके:${ul(['<b>डाइन-इन</b> – टेबल चुनें', '<b>टेकअवे</b> – तैयार होने पर काउंटर से लें', `<b>होम डिलीवरी</b> – ${money(S.deliveryFee)} डिलीवरी चार्ज; पता और फ़ोन ज़रूरी`])}`) }; }
+        },
+        {
+            id: 'payment', k: [['payment', 5], ['payments', 5], ['pay', 3], ['upi', 4], ['card', 3], ['cash', 3], ['paytm', 3], ['gpay', 3], ['phonepe', 3], ['how to pay', 6], ['भुगतान', 5], ['पेमेंट', 5], ['पैसे', 3], ['paise', 3], ['kaise pay', 5]],
+            fn: () => ({ h: staffy() ? L('Payments: staff can take <b>Cash</b> (with change calculator), <b>Card</b> or <b>UPI</b> at checkout. Online orders arrive <b>unpaid</b> – press <b>Collect</b> in Orders/Payments (or complete the order) to record the payment.') : L('You can pay at the restaurant (cash, card or UPI) when you finish eating or when your takeaway/delivery arrives. Online orders do not need advance payment.', 'आप खाना खत्म होने पर या टेकअवे/डिलीवरी मिलने पर रेस्टोरेंट में कैश, कार्ड या UPI से भुगतान कर सकते हैं। ऑनलाइन ऑर्डर में एडवांस की ज़रूरत नहीं।') })
+        },
+        {
+            id: 'gst', k: [['gst', 5], ['tax', 4], ['taxes', 4], ['gstin', 5], ['invoice', 3], ['receipt', 3], ['जीएसटी', 5], ['टैक्स', 4]],
+            fn: () => { const S = DB.settings; return { h: L(`GST is <b>${S.taxRate}%</b> (${S.taxRate / 2}% CGST + ${S.taxRate / 2}% SGST), added on the bill after discounts. Menu prices are shown <b>without</b> GST. GSTIN: ${esc(S.gstin)}.`, `GST <b>${S.taxRate}%</b> है, जो छूट के बाद बिल में जुड़ता है। मेन्यू की कीमतें GST के <b>बिना</b> हैं।`) }; }
+        },
+        {
+            id: 'howorder', k: [['how to order', 7], ['place order', 6], ['place an order', 6], ['order online', 6], ['how do i order', 7], ['order food', 5], ['ऑर्डर कैसे', 6], ['ऑर्डर करना', 5], ['order kaise', 6]],
+            fn: () => ({ h: staffy() ? L('To take an order: <b>Menu</b> → tap + on dishes → choose Dine-in / Takeaway / Delivery in the basket → <b>PAY</b> → pick table, enter customer details and payment → the bill prints.') : L('Ordering is easy:' + ul(['Open the menu and tap <b>Add</b> on the dishes you like', 'Tap the basket → <b>Checkout</b>', 'Choose Dine-in, Takeaway or Delivery, enter name & phone', 'Tap <b>Place Order</b> – we will alert you when it is ready 🔔']), 'ऑर्डर करना आसान है:' + ul(['मेन्यू में पसंदीदा डिश पर <b>Add</b> दबाएँ', 'बास्केट → <b>Checkout</b>', 'डाइन-इन / टेकअवे / डिलीवरी चुनें, नाम और फ़ोन भरें', '<b>Place Order</b> दबाएँ – तैयार होते ही आपको सूचना मिलेगी 🔔'])), a: staffy() ? [{ id: 'go:menu', label: 'Open Menu' }] : [{ id: 'cust:menu', label: L('Start ordering', 'ऑर्डर शुरू करें') }] })
+        },
+        {
+            id: 'book', k: [['book', 4], ['booking', 4], ['reserve', 5], ['reservation', 5], ['book a table', 8], ['table booking', 8], ['table', 3], ['tables', 3], ['seat', 3], ['seats', 3], ['टेबल', 5], ['बुकिंग', 5], ['बुक', 4], ['reserve table', 8], ['free table', 6], ['table free', 6], ['available table', 6]],
+            fn: t => {
+                const w = parseWhen(t);
+                if (w.guests || w.time || w.date || /free|available|khali|खाली|उपलब्ध/.test(norm(t))) return availability(t);
+                return { h: L('To book a table:' + ul(['Tap <b>Book a Table</b>', 'Enter name, phone, date, time and number of guests', 'We pick the smallest free table that fits – you get it confirmed instantly']) + 'Tip: ask me "is a table free for 4 tomorrow at 8 pm?" and I\'ll check live availability.', 'टेबल बुक करने के लिए:' + ul(['<b>Book a Table</b> दबाएँ', 'नाम, फ़ोन, तारीख, समय और लोगों की संख्या भरें', 'हम सबसे छोटी फिट होने वाली खाली टेबल देकर तुरंत कन्फर्म कर देते हैं']) + 'पूछकर देखें: "कल रात 8 बजे 4 लोगों के लिए टेबल खाली है?"'), a: [{ id: 'book', label: L('Book a table', 'टेबल बुक करें') }] };
+            }
+        },
+        {
+            id: 'track', k: [['track', 5], ['status', 4], ['where is my order', 8], ['my order', 5], ['order status', 7], ['order ready', 6], ['how long', 3], ['eta', 3], ['kab aayega', 5], ['ऑर्डर कहाँ', 6], ['मेरा ऑर्डर', 6], ['स्टेटस', 4], ['order kahan', 6], ['fh-', 5]],
+            fn: t => trackAnswer(t)
+        },
+        {
+            id: 'cancel', k: [['cancel', 5], ['cancellation', 5], ['refund', 4], ['रद्द', 5], ['कैंसल', 5], ['वापस', 2]],
+            fn: t => {
+                if (/refund/.test(norm(t)) && staffy()) return { h: 'Refunds: <b>Payments</b> → find the bill → <b>Refund</b> (admin only). The order is cancelled and the payment is marked refunded. Unpaid online orders are simply cancelled from <b>Orders</b> (✕ button) – nothing is charged.' };
+                return { h: staffy() ? 'To cancel an order press the ✕ button in <b>Orders</b>. Paid orders are marked refunded; unpaid ones are voided. To cancel a booking use <b>Table Booking</b> → ✕.' : L('To cancel a <b>booking</b>: open <b>My Orders → My table bookings → Cancel booking</b>. To cancel an <b>order</b>, please call us quickly on ' + esc(DB.settings.phone) + ' before it is cooked.', '<b>बुकिंग</b> रद्द करने के लिए: <b>My Orders → My table bookings → Cancel booking</b>। <b>ऑर्डर</b> रद्द करने के लिए बनने से पहले ' + esc(DB.settings.phone) + ' पर कॉल करें।'), a: staffy() ? [] : [{ id: 'cust:track', label: L('Open My Orders', 'मेरे ऑर्डर खोलें') }] };
+            }
+        },
+        {
+            id: 'allergy', k: [['allergy', 6], ['allergic', 6], ['jain', 6], ['spicy', 4], ['spice', 3], ['less spicy', 6], ['no onion', 5], ['gluten', 5], ['nuts', 4], ['halal', 4], ['एलर्जी', 6], ['जैन', 6], ['तीखा', 4], ['मसालेदार', 4]],
+            fn: () => ({ h: L('Please add it in the <b>cooking note</b> at checkout (e.g. "Jain, no onion-garlic", "less spicy"). For serious allergies please also tell our staff on ' + esc(DB.settings.phone) + ' – I don\'t have ingredient lists, so I can\'t guarantee a dish is allergen-free.', 'कृपया चेकआउट में <b>cooking note</b> में लिखें (जैसे "जैन, बिना प्याज़-लहसुन", "कम तीखा")। गंभीर एलर्जी हो तो ' + esc(DB.settings.phone) + ' पर स्टाफ को भी बताएँ – मेरे पास सामग्री की पूरी सूची नहीं है।') })
+        },
+        {
+            id: 'theme', k: [['dark mode', 6], ['theme', 5], ['black and white', 8], ['black white', 8], ['monochrome', 6], ['colour', 2], ['color', 2], ['थीम', 5], ['ब्लैक', 4]],
+            fn: () => ({ h: L('The app has two looks: the default <b>Gold</b> theme and a <b>Black &amp; White</b> theme. Tap the ◐ button in the header (or in the menu on a phone). Your choice is remembered.', 'ऐप में दो थीम हैं: <b>Gold</b> और <b>Black &amp; White</b>। हेडर में ◐ बटन दबाएँ। आपकी पसंद याद रखी जाती है।'), a: [{ id: 'theme', label: L('Switch theme now', 'थीम बदलें') }] })
+        },
+        {
+            id: 'data', k: [['data saved', 6], ['where is data', 6], ['stored', 4], ['localstorage', 6], ['local storage', 6], ['lost', 3], ['backup', 4], ['डेटा', 4], ['सेव', 3]],
+            fn: () => ({ h: staffy() ? 'Everything is saved in this browser (localStorage) automatically. Use <b>Settings → Download backup</b> before clearing browser data or moving to another device. Customer and staff screens share the same data only when opened in the <b>same browser on the same device</b>.' : L('Your basket, bookings and orders are remembered on this device, so you will not lose them if you refresh the page.', 'आपकी बास्केट, बुकिंग और ऑर्डर इसी डिवाइस पर याद रहते हैं, पेज रीफ्रेश करने पर भी।') })
+        },
+        {
+            id: 'problem', k: [['not working', 6], ['problem', 4], ['issue', 4], ['error', 4], ['bug', 4], ['stuck', 4], ['blank', 4], ['cant', 2], ['doesnt work', 6], ['काम नहीं', 6], ['दिक्कत', 5], ['समस्या', 5]],
+            fn: () => ({ h: L('Try these quick fixes:' + ul(['Refresh the page (pull down on a phone)', 'Make sure the browser is <b>not</b> in private/incognito mode – saving needs local storage', 'Allow cookies/site data for this site', 'Still stuck? An admin can use <b>Settings → Reset to demo data</b> (after downloading a backup)']), 'ये आज़माएँ:' + ul(['पेज रीफ्रेश करें', 'ब्राउज़र प्राइवेट/इन्कॉग्निटो मोड में न हो', 'साइट डेटा/कुकीज़ की अनुमति दें', 'फिर भी न चले तो एडमिन Settings → Reset to demo data करे (पहले बैकअप लें)'])) })
+        },
+        {
+            id: 'lang', k: [['hindi', 4], ['in hindi', 6], ['हिंदी', 5], ['हिन्दी', 5], ['hindi me', 6]],
+            fn: () => { lang = 'hi'; return { h: 'ज़रूर! अब से मैं हिंदी में जवाब दूँगा (आप English में भी पूछ सकते हैं)। 🙏' }; }
+        },
+
+        /* ----- staff & admin ----- */
+        {
+            id: 's_sales', staff: true, k: [['sales', 5], ['revenue', 5], ['earning', 4], ['earnings', 4], ['income', 4], ['collection', 4], ['how much did we', 6], ['कमाई', 5], ['बिक्री', 5], ['सेल', 4]],
+            fn: () => role() === 'admin' ? { h: salesToday(), a: [{ id: 'go:reports', label: 'Open Reports' }] } : { h: 'Sales figures are for admins. I can tell you how many orders are live: ' + plural(DB.orders.filter(o => ACTIVE.includes(o.status)).length, 'order') + '.' }
+        },
+        {
+            id: 's_orders', staff: true, k: [['pending orders', 7], ['live orders', 7], ['kitchen', 5], ['pending', 4], ['orders now', 5], ['how many orders', 7], ['orders today', 6], ['active orders', 7], ['ऑर्डर कितने', 6]],
+            fn: () => { const live = DB.orders.filter(o => ACTIVE.includes(o.status)), by = s => live.filter(o => o.status === s).length, unpaid = live.filter(o => o.paymentStatus === 'pending').length; const today = DB.orders.filter(o => orderDay(o) === todayStr() && o.status !== 'cancelled').length; return { h: `Kitchen now: <b>${by('pending')}</b> waiting, <b>${by('preparing')}</b> cooking, <b>${by('ready')}</b> ready. ${unpaid ? unpaid + ' unpaid. ' : ''}Orders today: ${today}.`, a: [{ id: 'go:orders', label: 'Open Orders' }] }; }
+        },
+        {
+            id: 's_tables', staff: true, k: [['tables now', 7], ['table status', 7], ['free tables', 7], ['occupied', 4], ['tables free', 7], ['kaun si table', 6], ['टेबल खाली', 6]],
+            fn: () => { const st = DB.tables.map(t => ({ t, s: tableStatus(t).s })), n = k => st.filter(x => x.s === k); return { h: `Tables right now: <b>${n('free').length}</b> free (${n('free').map(x => x.t.name).join(', ') || '–'}), <b>${n('reserved').length}</b> reserved, <b>${n('occupied').length}</b> occupied.`, a: [{ id: 'go:bookings', label: 'Open Table Booking' }] }; }
+        },
+        {
+            id: 's_bookings', staff: true, k: [['bookings today', 8], ['reservations today', 8], ['todays bookings', 8], ['upcoming bookings', 8], ['who booked', 6], ['आज की बुकिंग', 8]],
+            fn: () => { const b = DB.bookings.filter(x => x.date === todayStr() && x.status === 'confirmed').sort((a, c) => a.time.localeCompare(c.time)); return { h: b.length ? `Today's bookings (${b.length}):` + ul(b.map(x => `${fmtT(x.time)} – ${esc(x.name)}, ${x.guests} guests, ${esc((tableById(x.tableId) || {}).name || '-')}`)) : 'No confirmed bookings for today.', a: [{ id: 'go:bookings', label: 'Open Table Booking' }] }; }
+        },
+        {
+            id: 's_collect', staff: true, k: [['collect payment', 8], ['collect', 4], ['unpaid', 6], ['mark paid', 7], ['online order payment', 8], ['pay at counter', 6], ['payment pending', 7]],
+            fn: () => ({ h: 'Online orders arrive <b>unpaid</b>. Open <b>Orders</b> (or Payments) and press <b>Collect</b> → choose Cash / Card / UPI → <b>Mark as paid</b>. Completing an unpaid order also asks you to collect payment first. Only paid orders count in sales reports.', a: [{ id: 'go:orders', label: 'Open Orders' }] })
+        },
+        {
+            id: 'h_dish', staff: true, adminOnly: true, k: [['add dish', 8], ['add item', 8], ['add new dish', 8], ['edit dish', 7], ['delete dish', 7], ['sold out', 5], ['change price', 7], ['update price', 7], ['new item', 6], ['dish photo', 6], ['upload photo', 6]],
+            fn: () => ({ h: 'Menu changes (admin): <b>Menu</b> → <b>Add Item</b> to create a dish (name, price, category, veg/non-veg, emoji, photo link or upload). On any card use the small buttons: 🚫 mark sold out, ✎ edit price/details, 🗑 delete. <b>Category</b> manages the category list.', a: [{ id: 'go:menu', label: 'Open Menu' }] })
+        },
+        {
+            id: 'h_settings', staff: true, adminOnly: true, k: [['change gst', 8], ['gst rate', 7], ['delivery charge', 6], ['change offer', 7], ['settings', 5], ['restaurant name', 6], ['change address', 7], ['gstin', 5]],
+            fn: () => ({ h: '<b>Settings</b> (admin): edit the restaurant profile (name, address, GSTIN – printed on bills) and <b>Billing &amp; offers</b> (GST %, delivery charge, the "spend more, save more" offer).', a: [{ id: 'go:settings', label: 'Open Settings' }] })
+        },
+        {
+            id: 'h_users', staff: true, adminOnly: true, k: [['add staff', 8], ['new staff', 8], ['add user', 8], ['staff account', 8], ['change password', 7], ['reset password', 7], ['forgot password', 7], ['create admin', 7], ['remove user', 7]],
+            fn: () => ({ h: '<b>Settings → Staff accounts</b>: add a team member (name, username, password, role Staff or Admin) or remove one. Everyone can change their own password from the profile menu (or the side menu on a phone). Staff can use orders, bookings, customers and payments; only admins get Reports, Settings, refunds and menu editing.', a: [{ id: 'go:settings', label: 'Open Settings' }] })
+        },
+        {
+            id: 'h_backup', staff: true, adminOnly: true, k: [['backup', 6], ['restore', 6], ['export', 5], ['csv', 6], ['download report', 7], ['reset demo', 7], ['reset', 4], ['delete all orders', 8], ['clear data', 6]],
+            fn: () => ({ h: 'Data tools: <b>Reports → Export CSV</b> downloads orders for the chosen period. <b>Settings → Your data</b> has Download backup, Restore backup, Delete all orders and Reset to demo data.', a: [{ id: 'go:settings', label: 'Open Settings' }] })
+        },
+        {
+            id: 'h_print', staff: true, k: [['print bill', 8], ['print', 5], ['bill', 3], ['reprint', 6], ['invoice', 3]],
+            fn: () => ({ h: 'Print or re-print any bill from <b>Orders</b> or <b>Payments</b> with the 🖨 button (or <b>Print bill</b> after payment). It prints a 80 mm receipt layout.', a: [{ id: 'go:orders', label: 'Open Orders' }] })
+        },
+        {
+            id: 'h_status', staff: true, k: [['mark ready', 8], ['start cooking', 8], ['change status', 7], ['update order', 6], ['complete order', 7], ['notify customer', 7]],
+            fn: () => ({ h: 'Order flow: <b>Pending → Start cooking → Mark ready → Complete</b>. Use the gold button on the order row or in Dashboard → Live orders. When you press <b>Mark ready</b>, an online customer gets an instant "order ready" alert (sound + banner) on their screen.', a: [{ id: 'go:orders', label: 'Open Orders' }] })
+        },
+        {
+            id: 'h_takeorder', staff: true, k: [['take order', 7], ['new order', 6], ['walk in', 5], ['walk-in', 5], ['start order', 6], ['seat guest', 6]],
+            fn: () => ({ h: 'New order: <b>Menu</b> → add dishes → <b>PAY</b>. For a booked guest, open <b>Table Booking</b> and press <b>Take order</b> on their reservation – the table, name and phone are filled in for you.', a: [{ id: 'go:menu', label: 'Open Menu' }] })
+        }
+    ];
+
+    /* ---------- score ---------- */
+    function score(intent, t, words) {
+        let s = 0;
+        for (const [kw, wt] of intent.k) {
+            if (hasHindi(kw)) { if (t.includes(kw)) s += wt; continue; }
+            if (kw.includes(' ') || kw.endsWith('-')) {
+                if ((' ' + t + ' ').includes(' ' + kw)) s += wt + 1;
+                else { const parts = kw.split(' ').filter(x => x.length > 1); if (parts.length > 1 && parts.every(p => words.some(w => near(w, p)))) s += wt * .85; }
+                continue;
+            }
+            if (words.some(w => near(w, kw))) s += words.includes(kw) ? wt : wt * .6;
+        }
+        return s;
+    }
+
+    function answer(text) {
+        const raw = String(text || '').trim();
+        if (hasHindi(raw)) lang = 'hi'; else if (/[a-z]{3,}/i.test(raw) && lang === 'hi' && !/hindi/.test(norm(raw))) lang = 'en';
+        const t = norm(raw), words = t.split(' ');
+        if (!t) return { h: L('Type a question and I will do my best 🙂', 'कोई सवाल लिखें, मैं कोशिश करूँगा 🙂') };
+
+        /* follow-up to a question I asked */
+        if (pending === 'track') { pending = null; if (/fh\s*-?\d+/i.test(raw) || digits(raw).length >= 10) return trackAnswer(raw); }
+        pending = null;
+
+        /* order id / phone typed on its own */
+        if (/^fh\s*-?\s*\d{3,6}$/i.test(raw.trim()) || /^\d{10}$/.test(raw.replace(/\D/g, '')) && raw.replace(/[\d\s+\-]/g, '') === '') return trackAnswer(raw);
+
+        /* intents */
+        let best = null, bs = 0, second = 0;
+        INTENTS.forEach(it => {
+            if (it.staff && !staffy()) return;
+            if (it.adminOnly && role() !== 'admin') return;
+            const s = score(it, t, words);
+            if (s > bs) { second = bs; bs = s; best = it; } else if (s > second) second = s;
+        });
+        const price = priceFilter(raw), hasPriceWords = price.cap || /\bveg\b|non[\s-]?veg|शाकाहारी|मांसाहारी|vegetarian|cheap|sasta|सस्ता/.test(t) || price.cats.length;
+        const dishes = findDishes(raw);
+
+        /* staff-only questions asked by a customer */
+        if (!staffy() && /(sales|revenue|todays? (sales|earning)|कमाई|बिक्री|add dish|add staff|admin password|settings)/.test(t)) return { h: L('That one is for restaurant staff 🙂 – I can help you with the menu, offers, bookings and your orders.', 'यह जानकारी रेस्टोरेंट स्टाफ के लिए है 🙂 – मैं मेन्यू, ऑफर, बुकिंग और आपके ऑर्डर में मदद कर सकता हूँ।') };
+
+        /* a dish name beats generic intents unless the intent is very strong */
+        if (dishes.length && (!best || bs < 9) && !(price.cap && dishes.length > 1)) {
+            if (dishes.length === 1) { const d = dishes[0]; return { h: dishCardHTML(d), a: addAct(d) }; }
+            return { h: L('I found these:', 'ये मिले:') + ul(dishes.map(dishLine)), a: dishes.filter(d => d.available).slice(0, 3).map(d => ({ id: 'add:' + d.id, label: '+ ' + d.name })) };
+        }
+        /* price / veg / category lists */
+        if (hasPriceWords && (!best || bs < 8 || ['menu', 'popular'].includes(best.id))) {
+            const list = price.list.slice(0, 8);
+            if (!list.length) return { h: L('No dishes match that. Try a higher budget or another category.', 'ऐसी कोई डिश नहीं मिली। बजट बढ़ाकर या दूसरी कैटेगरी में देखें।') };
+            const title = L(`${price.veg ? 'Veg ' : price.nonveg ? 'Non-veg ' : ''}dishes${price.cats.length ? ' in ' + price.cats.join(', ') : ''}${price.cap ? ' up to ' + money(price.cap) : ''}:`, `${price.veg ? 'शाकाहारी ' : price.nonveg ? 'मांसाहारी ' : ''}डिश${price.cap ? ' ' + money(price.cap) + ' तक' : ''}:`);
+            return { h: title + ul(list.map(dishLine)) + (price.list.length > list.length ? `<small>…and ${price.list.length - list.length} more</small>` : ''), a: list.slice(0, 3).flatMap(addAct) };
+        }
+        if (best && bs >= 3) {
+            const r = best.fn(raw);
+            return r;
+        }
+        /* nothing matched: offer the closest topics */
+        const hint = INTENTS.filter(i => !i.staff || staffy()).map(i => ({ i, s: score(i, t, words) })).filter(x => x.s > 0).sort((a, b) => b.s - a.s).slice(0, 3);
+        return { h: L("Hmm, I'm not sure about that one 🤔. I can help with the menu & prices, offers, table booking, order tracking, timings and payments. Try asking in a few words, like \"paneer dishes under 250\" or \"table for 4 at 8 pm\".", 'हम्म, इस बारे में पक्का नहीं हूँ 🤔। मैं मेन्यू, कीमत, ऑफर, टेबल बुकिंग, ऑर्डर ट्रैकिंग, समय और भुगतान में मदद कर सकता हूँ। जैसे पूछें: "₹250 से कम पनीर डिश" या "8 बजे 4 लोगों की टेबल"।') + (hint.length ? '' : '') + `<small><br>${L('Need a human? Call', 'इंसान से बात करें:')} ${esc(DB.settings.phone)}</small>` };
+    }
+
+    /* ---------- actions that buttons inside answers can run ---------- */
+    function doAct(id) {
+        const [k, v] = id.split(':');
+        if (k === 'add') { if (state.user) { cartAdd(v); } else { K.add(v); } return; }
+        if (k === 'go') { close(); location.hash = '#/' + v; return; }
+        if (k === 'book') { close(); if (state.user) openBookingModal(); else K.open('mBook'); return; }
+        if (k === 'cust') { close(); if (v === 'menu') { const m = $('#kmenu'); if (m) m.scrollIntoView({ behavior: 'smooth' }); } else if (v === 'track') K.open('mTrack'); return; }
+        if (k === 'theme') { applyTheme(getTheme() === 'bw' ? 'gold' : 'bw'); return; }
+    }
+
+    /* ---------- UI ---------- */
+    const chipsFor = r => r === 'admin' ? ['Today\'s sales', 'Pending orders', 'Tables now', 'How to add a dish?', 'How to collect payment?', 'Bookings today']
+        : r === 'staff' ? ['Pending orders', 'Tables now', 'Bookings today', 'How to collect payment?', 'How to print a bill?']
+            : ['Today\'s offers', 'Popular dishes', 'Veg dishes under ₹150', 'Table for 4 tomorrow 8 pm', 'Track my order', 'Opening hours'];
+    const chipsHi = ['आज के ऑफर', 'मशहूर डिश', '₹150 से कम शाकाहारी', 'खुलने का समय', 'टेबल बुक करें'];
+
+    function save() { try { localStorage.setItem(CHAT_KEY, JSON.stringify(msgs.slice(-40))); localStorage.setItem(ROLE_KEY, role()); } catch (e) { /* ignore */ } }
+    function render() {
+        const box = $('#botMsgs');
+        if (!box) return;
+        box.innerHTML = msgs.map((m, i) => `<div class="bm ${m.r}">${m.h}${m.a && m.a.length ? `<div class="bm-acts">${m.a.map(a => `<button type="button" data-bact="${esc(a.id)}">${esc(a.label)}</button>`).join('')}</div>` : ''}</div>`).join('');
+        box.scrollTop = box.scrollHeight;
+        $('#botChips').innerHTML = (lang === 'hi' && !staffy() ? chipsHi : chipsFor(role())).map(c => `<button type="button" data-bchip="${esc(c)}">${esc(c)}</button>`).join('');
+        $('#botSub').textContent = staffy() ? 'Staff helper – live data & how-to' : 'Ask me about the menu, orders, tables…';
+    }
+    function push(r, h, a) { msgs.push({ r, h, a }); save(); render(); }
+    function say(text, instant) {
+        const box = $('#botMsgs');
+        const reply = () => { const t = box.querySelector('.typing'); if (t) t.remove(); const r = answer(text); push('bot', r.h, r.a); };
+        if (instant) return reply();
+        const ty = document.createElement('div'); ty.className = 'bm bot typing'; ty.innerHTML = '<i></i><i></i><i></i>'; box.appendChild(ty); box.scrollTop = box.scrollHeight;
+        setTimeout(reply, 320 + Math.random() * 380);
+    }
+    function ask(text) {
+        text = String(text || '').trim();
+        if (!text) return;
+        push('me', esc(text));
+        say(text);
+    }
+    function greeting() {
+        const r = role();
+        return L(`Hi! I'm <b>FlavorBot</b> 🤖. ${r === 'admin' || r === 'staff' ? 'Ask me for live numbers (orders, tables, bookings) or how to do something in the app.' : 'Ask me about dishes, prices, offers, table availability or your order.'}`, 'नमस्ते! मैं <b>FlavorBot</b> हूँ 🤖। मेन्यू, कीमत, ऑफर, टेबल या अपने ऑर्डर के बारे में पूछें।');
+    }
+    function reset() { msgs = []; pending = null; push('bot', greeting()); }
+    function setOpen(o) {
+        isOpen = o;
+        $('#botPanel').classList.toggle('open', o);
+        $('#botPanel').setAttribute('aria-hidden', o ? 'false' : 'true');
+        $('#botFab').setAttribute('aria-expanded', o ? 'true' : 'false');
+        $('#botFab').classList.remove('has-new');
+        try { localStorage.setItem(SEEN_KEY, '1'); } catch (e) { /* ignore */ }
+        if (o) { if (role() !== localStorage.getItem(ROLE_KEY) || !msgs.length) reset(); else render(); if (!window.matchMedia('(max-width: 640px)').matches) setTimeout(() => $('#botInput').focus(), 150); }
+    }
+    function init() {
+        try { msgs = JSON.parse(localStorage.getItem(CHAT_KEY) || '[]') || []; } catch (e) { msgs = []; }
+        if (!localStorage.getItem(SEEN_KEY)) $('#botFab').classList.add('has-new');
+        $('#botFab').addEventListener('click', () => setOpen(!isOpen));
+        $('#botClose').addEventListener('click', () => setOpen(false));
+        $('#botClear').addEventListener('click', reset);
+        $('#botForm').addEventListener('submit', e => { e.preventDefault(); const i = $('#botInput'); const v = i.value; i.value = ''; ask(v); });
+        $('#botPanel').addEventListener('click', e => {
+            const c = e.target.closest('[data-bchip]'); if (c) return ask(c.dataset.bchip);
+            const a = e.target.closest('[data-bact]'); if (a) doAct(a.dataset.bact);
+        });
+        document.addEventListener('keydown', e => { if (e.key === 'Escape' && isOpen) setOpen(false); });
+    }
+    function close() { if (isOpen) setOpen(false); }
+    return { init, answer, ask, open: () => setOpen(true), close, reset };
+})();
 
 /* ---------- start ---------- */
 function boot() {
@@ -1969,8 +3030,17 @@ function boot() {
     loadCart();
     $$('[data-ic]').forEach(e => { if (!e.innerHTML.trim()) e.innerHTML = ic(e.dataset.ic, +e.dataset.size || 18); });
     document.title = DB.settings.name + ' – Restaurant Management';
+    let th = 'gold'; try { th = localStorage.getItem(THEME_KEY) || 'gold'; } catch (e) { /* ignore */ }
+    applyTheme(th, true);
     initLogin();
+    setLoginRole(user_last_role());
+    setScreen('login');
+    K.init();
+    BOT.init();
     const u = savedSessionUser();
     if (u) { $('#login').classList.add('hidden'); enterApp(u, true); }
+    else if (location.hash === '#customer') K.enter(K.loadProfile());
+    else { const cp = K.loadProfile(); if (cp && cp.phone) K.enter(cp); }
+    loadDishPhotos();
 }
 boot();
