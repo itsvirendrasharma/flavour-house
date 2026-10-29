@@ -2,133 +2,301 @@
 <html lang="en">
 
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#111111">
-  <title>Flavor House – Restaurant Management</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link
-    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Playfair+Display:wght@600;700&display=swap"
-    rel="stylesheet">
-  <link rel="stylesheet" href="style.css">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#111111" id="metaTheme">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <script>try { var t = localStorage.getItem("fh_theme"); if (t === "bw") document.documentElement.setAttribute("data-theme", "bw") } catch (e) { }</script>
+    <title>Flavor House – Restaurant Management</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Playfair+Display:wght@600;700&display=swap"
+        rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
 </head>
 
 <body>
 
-  <!-- =====================  LOGIN  ===================== -->
-  <div id="login" class="login">
-    <div class="bg-orbs" aria-hidden="true"><span></span><span></span><span></span></div>
-    <div class="floaters" id="floaters" aria-hidden="true"></div>
+    <!-- =====================  LOGIN  ===================== -->
+    <div id="login" class="login">
+        <div class="bg-orbs" aria-hidden="true"><span></span><span></span><span></span></div>
+        <div class="floaters" id="floaters" aria-hidden="true"></div>
 
-    <div class="login-shell">
-      <!-- brand side -->
-      <section class="login-brand">
-        <div class="orbit" aria-hidden="true">
-          <div class="orbit-ring"></div>
-          <div class="orbit-center">🍛</div>
-          <span style="--i:0">🍕</span><span style="--i:1">🍔</span><span style="--i:2">🍜</span>
-          <span style="--i:3">🍰</span><span style="--i:4">🥘</span><span style="--i:5">🍹</span>
+        <div class="login-shell">
+            <!-- brand side -->
+            <section class="login-brand">
+                <div class="orbit" aria-hidden="true">
+                    <div class="orbit-ring"></div>
+                    <div class="orbit-center">🍛</div>
+                    <span style="--i:0">🍕</span><span style="--i:1">🍔</span><span style="--i:2">🍜</span>
+                    <span style="--i:3">🍰</span><span style="--i:4">🥘</span><span style="--i:5">🍹</span>
+                </div>
+                <h2>Delicious Food,<br>Great Experience</h2>
+                <p>Orders, billing, tables and customers – everything your restaurant needs in one place.</p>
+            </section>
+
+            <!-- form side -->
+            <section class="login-card" id="loginCard">
+                <div class="login-logo" id="loginLogo"></div>
+                <h1 id="lgTitle">Welcome back</h1>
+                <p class="sub" id="lgSub">Sign in to manage <b>Flavor House</b></p>
+
+                <div class="role-tabs" id="roleTabs" role="tablist" aria-label="Sign in as">
+                    <button type="button" role="tab" data-role="admin" class="active">Admin</button>
+                    <button type="button" role="tab" data-role="staff">Staff</button>
+                    <button type="button" role="tab" data-role="customer">Customer</button>
+                </div>
+
+                <form id="loginForm" class="only-staff" autocomplete="on" novalidate>
+                    <div class="lf-field">
+                        <input id="lfUser" name="username" type="text" placeholder=" " autocomplete="username" required>
+                        <label for="lfUser">Username</label>
+                        <span class="lf-ic" data-ic="user"></span>
+                        <i class="lf-line"></i>
+                    </div>
+                    <div class="lf-field">
+                        <input id="lfPass" name="password" type="password" placeholder=" "
+                            autocomplete="current-password" required>
+                        <label for="lfPass">Password</label>
+                        <span class="lf-ic" data-ic="lock"></span>
+                        <button type="button" class="lf-eye" id="lfEye" aria-label="Show password"></button>
+                        <i class="lf-line"></i>
+                    </div>
+
+                    <div class="lf-row">
+                        <label class="check"><input type="checkbox" id="lfRemember" checked><span></span>Keep me signed
+                            in</label>
+                        <a href="#" id="lfForgot">Forgot password?</a>
+                    </div>
+
+                    <p class="lf-error" id="lfError" role="alert"></p>
+
+                    <button class="login-btn" id="lfSubmit" type="submit"><span>Sign in</span><i
+                            class="spin"></i></button>
+                </form>
+
+                <form id="custLoginForm" class="only-cust" autocomplete="on" novalidate>
+                    <div class="lf-field">
+                        <input id="clName" name="name" type="text" placeholder=" " autocomplete="name" maxlength="40">
+                        <label for="clName">Your name</label>
+                        <span class="lf-ic" data-ic="user"></span>
+                        <i class="lf-line"></i>
+                    </div>
+                    <div class="lf-field">
+                        <input id="clPhone" name="tel" type="tel" inputmode="numeric" maxlength="10" placeholder=" "
+                            autocomplete="tel">
+                        <label for="clPhone">Mobile number (10 digits)</label>
+                        <span class="lf-ic" data-ic="phone"></span>
+                        <i class="lf-line"></i>
+                    </div>
+                    <div class="lf-row">
+                        <label class="check"><input type="checkbox" id="clRemember" checked><span></span>Remember me on
+                            this device</label>
+                    </div>
+                    <p class="lf-error" id="clError" role="alert"></p>
+                    <button class="login-btn" type="submit"><span>Order food &amp; book tables</span></button>
+                    <button type="button" class="guest-link" id="goCust">Continue as guest</button>
+                </form>
+
+                <div class="demo-box only-staff" id="demoBox">
+                    <small>Demo accounts – tap to fill</small>
+                    <div>
+                        <button type="button" class="demo-chip" data-demo="admin|admin123" data-for="admin"><b>Admin</b>
+                            admin /
+                            admin123</button>
+                        <button type="button" class="demo-chip" data-demo="staff|staff123" data-for="staff"><b>Staff</b>
+                            staff /
+                            staff123</button>
+                    </div>
+                </div>
+                <div class="demo-box only-cust">
+                    <small>Demo customer – tap to fill</small>
+                    <div><button type="button" class="demo-chip" id="demoCust"><b>Aarav</b> 9876501234</button></div>
+                </div>
+                <button type="button" class="theme-pill" data-action="toggle-theme" aria-label="Switch theme"><span
+                        data-theme-label>Black &amp; White theme</span></button>
+            </section>
         </div>
-        <h2>Delicious Food,<br>Great Experience</h2>
-        <p>Orders, billing, tables and customers – everything your restaurant needs in one place.</p>
-      </section>
+    </div>
 
-      <!-- form side -->
-      <section class="login-card" id="loginCard">
-        <div class="login-logo" id="loginLogo"></div>
-        <h1>Welcome back</h1>
-        <p class="sub">Sign in to manage <b>Flavor House</b></p>
+    <!-- =====================  APP  ===================== -->
+    <div id="app" class="app hidden">
 
-        <form id="loginForm" autocomplete="on" novalidate>
-          <div class="lf-field">
-            <input id="lfUser" name="username" type="text" placeholder=" " autocomplete="username" required>
-            <label for="lfUser">Username</label>
-            <span class="lf-ic" data-ic="user"></span>
-            <i class="lf-line"></i>
-          </div>
-          <div class="lf-field">
-            <input id="lfPass" name="password" type="password" placeholder=" " autocomplete="current-password" required>
-            <label for="lfPass">Password</label>
-            <span class="lf-ic" data-ic="lock"></span>
-            <button type="button" class="lf-eye" id="lfEye" aria-label="Show password"></button>
-            <i class="lf-line"></i>
-          </div>
+        <header class="topbar">
+            <div class="brand" id="topBrand"></div>
+            <button class="icon-btn top-burger" data-action="toggle-sidebar" aria-label="Toggle menu" data-ic="burger"
+                data-size="22"></button>
 
-          <div class="lf-row">
-            <label class="check"><input type="checkbox" id="lfRemember" checked><span></span>Keep me signed in</label>
-            <a href="#" id="lfForgot">Forgot password?</a>
-          </div>
+            <label class="search" aria-label="Search dishes">
+                <input id="globalSearch" data-input="search" type="search" placeholder="Search dishes..."
+                    autocomplete="off">
+                <span data-ic="search" data-size="17"></span>
+            </label>
 
-          <p class="lf-error" id="lfError" role="alert"></p>
+            <div class="top-actions">
+                <button class="icon-btn theme-btn" data-action="toggle-theme" aria-label="Switch theme"
+                    title="Switch theme"><span data-theme-icon></span></button>
+                <button class="btn gold sm book-btn" data-action="book-table"><span data-ic="calendar"
+                        data-size="16"></span>Book a Table</button>
+                <button class="icon-btn cart-btn" data-action="goto-cart" aria-label="Open basket">
+                    <span data-ic="cart" data-size="22"></span>
+                    <b class="badge-dot" id="cartBadge">0</b>
+                </button>
+                <div class="user-menu" id="userMenu">
+                    <button class="user-btn" data-action="toggle-user" aria-haspopup="true">
+                        <span class="avatar" id="userAvatar">A</span>
+                        <span class="user-hi" id="userHi">Hi, Admin</span>
+                        <span data-ic="chevron" data-size="16"></span>
+                    </button>
+                    <div class="user-drop" id="userDrop"></div>
+                </div>
+            </div>
+        </header>
 
-          <button class="login-btn" id="lfSubmit" type="submit"><span>Sign in</span><i class="spin"></i></button>
+        <aside class="sidebar" id="sidebar">
+            <nav id="nav"></nav>
+            <div class="offer" id="offerCard"></div>
+        </aside>
+
+        <main class="main" id="main">
+            <div id="view"></div>
+        </main>
+
+        <!-- mobile bottom checkout bar -->
+        <div class="checkout-bar" id="checkoutBar">
+            <div class="cb-total" data-action="goto-cart"><small>Total</small><b id="cbTotal">₹0</b></div>
+            <button class="btn gold lg" data-action="checkout">Proceed to Pay</button>
+        </div>
+    </div>
+
+    <!-- =====================  CUSTOMER SIDE  ===================== -->
+    <div id="custApp" class="hidden">
+        <header class="k-head">
+            <h1>🍴 Flavor House</h1>
+            <nav class="k-nav" aria-label="Customer menu">
+                <a href="#" onclick="K.open('mBook');return false">Book Table</a>
+                <a href="#" onclick="K.open('mTrack');K.track();return false">My Orders</a>
+                <a href="#" onclick="K.exit();return false">Staff Login</a>
+                <a href="#" id="kOut" onclick="K.signout();return false" style="display:none">Sign out</a>
+            </nav>
+            <button class="k-theme" data-action="toggle-theme" aria-label="Switch theme"><span
+                    data-theme-icon></span></button>
+            <button class="k-cartb" onclick="K.cart(1)">🛒 <span class="k-cl">Basket</span> (<span
+                    id="kcn">0</span>)</button>
+        </header>
+        <section class="k-hero">
+            <div class="k-float" aria-hidden="true">
+                <span>🍕</span><span>🍛</span><span>🍜</span><span>🍰</span><span>🍹</span></div>
+            <p class="k-hi" id="kHi"></p>
+            <h2>Delicious Food, Great Experience</h2>
+            <p>Order online for dine-in, takeaway or home delivery – or reserve your table.</p>
+            <button class="k-btn" onclick="document.getElementById('kmenu').scrollIntoView({behavior:'smooth'})">Order
+                Now</button>
+            <button class="k-btn k-o" onclick="K.open('mBook')">Book a Table</button>
+        </section>
+        <div class="k-wrap" id="kmenu">
+            <div class="k-tools"><input id="kq" placeholder="Search dishes..." oninput="K.draw(1)">
+                <select id="kvf" onchange="K.draw(1)" style="max-width:150px">
+                    <option value="">All</option>
+                    <option value="v">Veg only</option>
+                    <option value="n">Non-veg</option>
+                </select>
+            </div>
+            <div class="k-chips" id="kchips"></div>
+            <div class="k-grid" id="kgrid"></div>
+            <p id="kmsg" style="margin-top:20px"></p>
+        </div>
+        <footer>© Flavor House · Open daily 11:00 AM – 10:30 PM</footer>
+        <div class="k-scrim" id="kscrim" onclick="K.cart(0);K.close()"></div>
+        <aside class="k-drawer" id="kdrawer">
+            <div class="k-dh"><span>Your Basket</span><button onclick="K.cart(0)"
+                    style="background:none;font-size:20px">✕</button></div>
+            <div class="k-dbody" id="kcl"></div>
+            <div class="k-df" id="kcf"></div>
+        </aside>
+
+        <div class="k-modal" id="kmCo">
+            <div class="k-mc">
+                <h3>Checkout</h3>
+                <div class="k-seg" id="ktyp"><button data-t="dine-in" class="k-on">Dine-in</button><button
+                        data-t="takeaway">Takeaway</button><button data-t="delivery">Delivery</button></div>
+                <div><label>Name</label><input id="kcName"></div>
+                <div><label>Phone (10 digits)</label><input id="kcPh" inputmode="numeric" maxlength="10"></div>
+                <div id="kfT"><label>Table</label><select id="kcTb"></select></div>
+                <div id="kfA" style="display:none"><label>Delivery address</label><textarea id="kcAd"
+                        rows="2"></textarea></div>
+                <div><label>Cooking note (optional)</label><input id="kcNo" placeholder="Less spicy, no onion..."></div>
+                <div><label>Coupon code (optional)</label><input id="kcCp" placeholder="WELCOME10 / FLAT50 / FEAST20"
+                        autocapitalize="characters" oninput="K.upd()"></div>
+                <div class="k-tot"><span>Subtotal</span><span id="kcS">₹0</span></div>
+                <div class="k-tot" id="kcDr"><span id="kcDl">Discount</span><span id="kcDv">₹0</span></div>
+                <div class="k-tot k-b"><span>Total</span><span id="kcT">₹0</span></div>
+                <button class="k-btn" onclick="K.place()">Place Order (pay at restaurant / on delivery)</button>
+                <button class="k-btn k-o" onclick="K.close()">Cancel</button>
+            </div>
+        </div>
+
+        <div class="k-modal" id="kmBook">
+            <div class="k-mc">
+                <h3>Book a Table</h3>
+                <div><label>Name</label><input id="kbN"></div>
+                <div><label>Phone</label><input id="kbP" inputmode="numeric" maxlength="10"></div>
+                <div class="k-row">
+                    <div style="flex:1"><label>Date</label><input type="date" id="kbD" onchange="K.slots()"></div>
+                    <div style="flex:1"><label>Time</label><select id="kbTm" onchange="K.slots()"></select></div>
+                </div>
+                <div><label>Guests</label><input type="number" id="kbG" min="1" max="10" value="2" oninput="K.slots()">
+                </div>
+                <p class="k-hint" id="kbHint"></p>
+                <div><label>Special request</label><input id="kbNo"></div>
+                <button class="k-btn" onclick="K.book()">Confirm Booking</button><button class="k-btn k-o"
+                    onclick="K.close()">Close</button>
+            </div>
+        </div>
+
+        <div class="k-modal" id="kmTrack">
+            <div class="k-mc">
+                <h3>My Orders &amp; Bookings</h3>
+                <div class="k-row"><input id="ktP" inputmode="numeric" maxlength="10"
+                        placeholder="Your phone number"><button class="k-btn" onclick="K.track()">Find</button></div>
+                <div id="ktR" style="display:grid;gap:8px"></div>
+                <h4 class="k-sub">My table bookings</h4>
+                <div id="ktB" style="display:grid;gap:8px"></div>
+                <button class="k-btn k-o" onclick="K.close()">Close</button>
+            </div>
+        </div>
+        <button class="k-bar" id="kBar" onclick="K.cart(1)" aria-label="Open basket"><span id="kBarN">0 items</span><b
+                id="kBarT">₹0</b><span>View basket ›</span></button>
+        <div class="k-banner" id="kBanner"><span id="kBannerTxt"></span><button onclick="K.dismiss()">OK</button></div>
+    </div>
+
+    <div id="scrim"></div>
+    <div id="modalRoot"></div>
+    <div id="toasts" aria-live="polite"></div>
+    <div id="printArea"></div>
+
+    <!-- FlavorBot assistant (built in script.js) -->
+    <button id="botFab" class="bot-fab" aria-label="Open help assistant" aria-expanded="false"><span
+            class="bf-ic">💬</span><span class="bf-tx">Help</span></button>
+    <section id="botPanel" class="bot-panel" role="dialog" aria-label="FlavorBot assistant" aria-hidden="true">
+        <header class="bot-head">
+            <span class="bot-av">🤖</span>
+            <div><b>FlavorBot</b><small id="botSub">Ask me about the menu, orders, tables…</small></div>
+            <button class="bot-x" id="botClear" aria-label="Clear chat" title="Clear chat">⟲</button>
+            <button class="bot-x" id="botClose" aria-label="Close assistant">✕</button>
+        </header>
+        <div class="bot-msgs" id="botMsgs" aria-live="polite"></div>
+        <div class="bot-chips" id="botChips"></div>
+        <form class="bot-form" id="botForm" autocomplete="off">
+            <input id="botInput" type="text" placeholder="Type your question… (English / हिंदी)" enterkeyhint="send"
+                maxlength="200">
+            <button type="submit" aria-label="Send">➤</button>
         </form>
+    </section>
 
-        <div class="demo-box">
-          <small>Demo accounts – tap to fill</small>
-          <div>
-            <button type="button" class="demo-chip" data-demo="admin|admin123"><b>Admin</b> admin / admin123</button>
-            <button type="button" class="demo-chip" data-demo="staff|staff123"><b>Staff</b> staff / staff123</button>
-          </div>
-        </div>
-      </section>
-    </div>
-  </div>
-
-  <!-- =====================  APP  ===================== -->
-  <div id="app" class="app hidden">
-
-    <header class="topbar">
-      <div class="brand" id="topBrand"></div>
-      <button class="icon-btn top-burger" data-action="toggle-sidebar" aria-label="Toggle menu" data-ic="burger"
-        data-size="22"></button>
-
-      <label class="search" aria-label="Search dishes">
-        <input id="globalSearch" data-input="search" type="search" placeholder="Search dishes..." autocomplete="off">
-        <span data-ic="search" data-size="17"></span>
-      </label>
-
-      <div class="top-actions">
-        <button class="btn gold sm book-btn" data-action="book-table"><span data-ic="calendar"
-            data-size="16"></span>Book a Table</button>
-        <button class="icon-btn cart-btn" data-action="goto-cart" aria-label="Open basket">
-          <span data-ic="cart" data-size="22"></span>
-          <b class="badge-dot" id="cartBadge">0</b>
-        </button>
-        <div class="user-menu" id="userMenu">
-          <button class="user-btn" data-action="toggle-user" aria-haspopup="true">
-            <span class="avatar" id="userAvatar">A</span>
-            <span class="user-hi" id="userHi">Hi, Admin</span>
-            <span data-ic="chevron" data-size="16"></span>
-          </button>
-          <div class="user-drop" id="userDrop"></div>
-        </div>
-      </div>
-    </header>
-
-    <aside class="sidebar" id="sidebar">
-      <nav id="nav"></nav>
-      <div class="offer" id="offerCard"></div>
-    </aside>
-
-    <main class="main" id="main">
-      <div id="view"></div>
-    </main>
-
-    <!-- mobile bottom checkout bar -->
-    <div class="checkout-bar" id="checkoutBar">
-      <div class="cb-total" data-action="goto-cart"><small>Total</small><b id="cbTotal">₹0</b></div>
-      <button class="btn gold lg" data-action="checkout">Proceed to Pay</button>
-    </div>
-  </div>
-
-  <div id="scrim"></div>
-  <div id="modalRoot"></div>
-  <div id="toasts" aria-live="polite"></div>
-  <div id="printArea"></div>
-
-  <script src="script.js"></script>
+    <script src="script.js"></script>
 </body>
 
 </html>
